@@ -149,18 +149,20 @@ class TradeExecutor:
 
         try:
             link_id = f"{ORDER_PREFIX}-{uuid.uuid4().hex[:16]}"
-            result = self._api_call(
-                "place_order",
-                category="linear",
-                symbol=cfg.SYMBOL,
-                side=side,
-                orderType="Market",
-                qty=str(qty),
-                stopLoss=str(round(sl, 2)),
-                takeProfit=str(round(tp, 2)),
-                positionIdx=0,
-                orderLinkId=link_id,
-            )
+            order_params = {
+                "category": "linear",
+                "symbol": cfg.SYMBOL,
+                "side": side,
+                "orderType": "Market",
+                "qty": str(qty),
+                "stopLoss": str(round(sl, 2)),
+                "takeProfit": str(round(tp, 2)),
+                "tpOrderType": cfg.TP_ORDER_TYPE,
+                "slOrderType": cfg.SL_ORDER_TYPE,
+                "positionIdx": 0,
+                "orderLinkId": link_id,
+            }
+            result = self._api_call("place_order", **order_params)
             if result["retCode"] == 0:
                 order_id = result["result"]["orderId"]
 
