@@ -6,48 +6,46 @@ import json
 import re
 import logging
 
-from config import (
-    LLM_PROVIDER,
-    ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
-    GOOGLE_API_KEY, GOOGLE_MODEL,
-    OPENAI_API_KEY, OPENAI_MODEL,
-)
+import config as cfg
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """Voce e um trader profissional de Bitcoin Futures (BTCUSDT perpetual) na Bybit.
-Voce opera com alavancagem 25x em timeframe de 15 minutos.
+
+def _build_system_prompt() -> str:
+    """Constroi system prompt com valores da config."""
+    return f"""Voce e um trader profissional de Bitcoin Futures ({cfg.SYMBOL} perpetual) na Bybit.
+Voce opera com alavancagem {cfg.LEVERAGE}x em timeframe de {cfg.TIMEFRAME} minutos.
 
 REGRAS:
 1. Analise os dados de mercado fornecidos (candles, indicadores, contexto diario)
 2. Decida: LONG, SHORT ou HOLD (nao operar agora)
 3. Se LONG ou SHORT, defina entry, stop_loss e take_profit
-4. SL deve ser entre 0.3% e 1.0% do preco de entrada
-5. TP deve ser pelo menos 1.0x a distancia do SL (risk/reward >= 1:1)
+4. SL deve ser entre {cfg.SL_MIN_PCT}% e {cfg.SL_MAX_PCT}% do preco de entrada
+5. TP deve ser pelo menos {cfg.MIN_RR_RATIO}x a distancia do SL (risk/reward >= {cfg.MIN_RR_RATIO}:1)
 6. Se ja existe posicao aberta, voce pode: HOLD (manter), CLOSE (fechar), ou ajustar SL/TP
 7. Seja conservador — so entre quando ha alta confianca no setup
 8. Considere: tendencia (EMAs), momentum (RSI, MACD), volatilidade (ATR, BB), volume
-9. Evite operar em mercado lateral/ranging (ADX < 15)
+9. Evite operar em mercado lateral/ranging (ADX < {cfg.ADX_RANGING_THRESHOLD:.0f})
 10. Considere o contexto diario para nao operar contra a macro tendencia
 
 RESPONDA SEMPRE em JSON valido com esta estrutura:
-{
+{{
     "action": "LONG" | "SHORT" | "HOLD" | "CLOSE",
     "confidence": 0.0 a 1.0,
     "entry": preco_de_entrada (null se HOLD/CLOSE),
     "stop_loss": preco_do_sl (null se HOLD/CLOSE),
     "take_profit": preco_do_tp (null se HOLD/CLOSE),
     "reason": "explicacao curta do setup (max 2 frases)"
-}
+}}
 
 Se HOLD, explique por que nao ha setup.
 Se CLOSE, explique por que fechar a posicao.
-Confianca minima para operar: 0.7 (abaixo disso, retorne HOLD)."""
+Confianca minima para operar: {cfg.MIN_CONFIDENCE} (abaixo disso, retorne HOLD)."""
 
 
 def create_analyst() -> "BaseAnalyst":
     """Factory: cria o analyst correto baseado no LLM_PROVIDER."""
-    provider = LLM_PROVIDER.lower()
+    provider = cfg.LLM_PROVIDER.lower()
     if provider == "anthropic":
         return AnthropicAnalyst()
     elif provider == "google":
@@ -55,7 +53,7 @@ def create_analyst() -> "BaseAnalyst":
     elif provider == "openai":
         return OpenAIAnalyst()
     else:
-        raise ValueError(f"Provider desconhecido: {LLM_PROVIDER}. Use: anthropic, google, openai")
+        raise ValueError(f"Provider desconhecido: {cfg.LLM_PROVIDER}. Use: anthropic, google, openai")
 
 
 class BaseAnalyst:
@@ -69,6 +67,7 @@ class BaseAnalyst:
     def analyze(self, market_data: str) -> dict:
         """Envia dados a LLM e retorna decisao."""
         user_msg = market_data + self._history_text()
+        text = None
 
         try:
             text, input_tokens, output_tokens = self._call_llm(user_msg)
@@ -81,22 +80,45 @@ class BaseAnalyst:
 
             decision = self._parse_json(text)
 
-            # Validacao
+            # Garante que confidence e numerico
+            try:
+                decision["confidence"] = float(decision.get("confidence", 0))
+            except (TypeError, ValueError):
+                decision["confidence"] = 0.0
+
+            # Validacao de action
             if decision["action"] not in ("LONG", "SHORT", "HOLD", "CLOSE"):
                 logger.warning(f"[{self.provider_name}] Acao invalida: {decision['action']}")
                 decision["action"] = "HOLD"
 
-            if decision.get("confidence", 0) < 0.7 and decision["action"] in ("LONG", "SHORT"):
+            if decision["confidence"] < cfg.MIN_CONFIDENCE and decision["action"] in ("LONG", "SHORT"):
                 logger.info(f"[{self.provider_name}] Confianca baixa ({decision['confidence']:.1f}), convertendo para HOLD")
                 decision["action"] = "HOLD"
 
-            logger.info(f"[{self.provider_name}] {self.model} | {decision['action']} | conf={decision.get('confidence', 0):.1f} | {decision.get('reason', '')}")
+            # Validacao de entry/SL/TP para LONG/SHORT
+            if decision["action"] in ("LONG", "SHORT"):
+                entry = decision.get("entry")
+                sl = decision.get("stop_loss")
+                tp = decision.get("take_profit")
+
+                if entry is None or sl is None or tp is None:
+                    logger.warning(f"[{self.provider_name}] Entry/SL/TP ausentes, convertendo para HOLD")
+                    decision["action"] = "HOLD"
+                elif decision["action"] == "LONG" and (sl >= entry or tp <= entry):
+                    logger.warning(f"[{self.provider_name}] SL/TP invalidos para LONG: SL={sl} Entry={entry} TP={tp}")
+                    decision["action"] = "HOLD"
+                elif decision["action"] == "SHORT" and (sl <= entry or tp >= entry):
+                    logger.warning(f"[{self.provider_name}] SL/TP invalidos para SHORT: SL={sl} Entry={entry} TP={tp}")
+                    decision["action"] = "HOLD"
+
+            logger.info(f"[{self.provider_name}] {self.model} | {decision['action']} | conf={decision['confidence']:.1f} | {decision.get('reason', '')}")
             logger.info(f"[{self.provider_name}] Tokens: {input_tokens}in/{output_tokens}out")
 
             return decision
 
         except json.JSONDecodeError as e:
-            logger.error(f"[{self.provider_name}] JSON invalido: {e}\nResposta: {text}")
+            resp_text = text if text is not None else "(sem resposta)"
+            logger.error(f"[{self.provider_name}] JSON invalido: {e}\nResposta: {resp_text}")
             return {"action": "HOLD", "confidence": 0, "reason": f"Erro parsing JSON: {e}"}
         except Exception as e:
             logger.error(f"[{self.provider_name}] Erro: {e}")
@@ -138,7 +160,12 @@ class BaseAnalyst:
         recent = self.trade_history[-10:]
         lines = ["\n\n=== HISTORICO RECENTE DE DECISOES ==="]
         for h in recent:
-            lines.append(f"  {h['time']} | {h['action']} | conf={h['confidence']:.1f} | {h['reason']}")
+            conf = h.get('confidence', 0)
+            try:
+                conf_str = f"{float(conf):.1f}"
+            except (TypeError, ValueError):
+                conf_str = str(conf)
+            lines.append(f"  {h['time']} | {h['action']} | conf={conf_str} | {h['reason']}")
             if h.get('result'):
                 lines.append(f"    -> Resultado: {h['result']}")
         return "\n".join(lines)
@@ -159,15 +186,15 @@ class AnthropicAnalyst(BaseAnalyst):
     """Anthropic Claude."""
 
     def __init__(self):
-        super().__init__("CLAUDE", ANTHROPIC_MODEL)
+        super().__init__("CLAUDE", cfg.ANTHROPIC_MODEL)
         import anthropic
-        self.client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        self.client = anthropic.Anthropic(api_key=cfg.ANTHROPIC_API_KEY)
 
     def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
         response = self.client.messages.create(
             model=self.model,
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
+            system=_build_system_prompt(),
             messages=[{"role": "user", "content": user_msg}]
         )
         text = response.content[0].text.strip()
@@ -178,9 +205,9 @@ class GoogleAnalyst(BaseAnalyst):
     """Google Gemini."""
 
     def __init__(self):
-        super().__init__("GEMINI", GOOGLE_MODEL)
+        super().__init__("GEMINI", cfg.GOOGLE_MODEL)
         from google import genai
-        self.client = genai.Client(api_key=GOOGLE_API_KEY)
+        self.client = genai.Client(api_key=cfg.GOOGLE_API_KEY)
 
     def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
         from google.genai import types
@@ -189,7 +216,7 @@ class GoogleAnalyst(BaseAnalyst):
             model=self.model,
             contents=user_msg,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=_build_system_prompt(),
                 max_output_tokens=2048,
                 temperature=0.3,
                 response_mime_type="application/json",
@@ -206,9 +233,9 @@ class OpenAIAnalyst(BaseAnalyst):
     """OpenAI GPT."""
 
     def __init__(self):
-        super().__init__("OPENAI", OPENAI_MODEL)
+        super().__init__("OPENAI", cfg.OPENAI_MODEL)
         from openai import OpenAI
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        self.client = OpenAI(api_key=cfg.OPENAI_API_KEY)
 
     def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
         response = self.client.chat.completions.create(
@@ -216,7 +243,7 @@ class OpenAIAnalyst(BaseAnalyst):
             max_tokens=1024,
             temperature=0.3,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": _build_system_prompt()},
                 {"role": "user", "content": user_msg},
             ]
         )

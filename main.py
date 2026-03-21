@@ -21,11 +21,12 @@ try:
 except Exception:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-from config import CHECK_INTERVAL, LLM_PROVIDER, SYMBOL
+import config as cfg
 from market_data import MarketData
 from analyst import create_analyst
 from executor import TradeExecutor
 from monitor import show_status
+import db
 
 # Logging — console + arquivo
 os.makedirs("logs", exist_ok=True)
@@ -52,14 +53,14 @@ def print_banner(dry_run: bool, analyst):
     +--------------------------------------------------------------+
     |  Provider: {analyst.provider_name:<47s}|
     |  Model: {analyst.model:<50s}|
-    |  Symbol: {SYMBOL:<49s}|
+    |  Symbol: {cfg.SYMBOL:<49s}|
     |  Mode: {mode:<51s}|
     +--------------------------------------------------------------+
     |  1. Coleta dados de mercado (klines + indicadores)           |
     |  2. Envia a LLM para analise                                 |
     |  3. LLM decide: LONG / SHORT / HOLD / CLOSE                 |
     |  4. Executor abre/fecha posicao na Bybit                     |
-    |  5. Repete a cada {CHECK_INTERVAL}s                                       |
+    |  5. Repete a cada {cfg.CHECK_INTERVAL}s                                       |
     +==============================================================+
     """)
 
@@ -70,12 +71,12 @@ def main():
     parser.add_argument("--once", action="store_true", help="Roda uma vez e sai")
     args = parser.parse_args()
 
-    import config as cfg
     if args.live:
         cfg.DRY_RUN = False
     dry_run = cfg.DRY_RUN
 
     # Init components
+    db.init_db()
     market = MarketData()
     analyst = create_analyst()
     executor = TradeExecutor()
@@ -98,6 +99,9 @@ def main():
             now = datetime.now(timezone.utc)
             logger.info(f"{'='*60}")
             logger.info(f"[ITER {iteration}] {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+            # 0. Verifica se posicao foi fechada por TP/SL da Bybit
+            executor.check_closed_by_exchange()
 
             # 1. Coleta dados
             logger.info("[DATA] Coletando dados de mercado...")
@@ -133,9 +137,9 @@ def main():
             break
 
         # Sleep
-        logger.info(f"[SLEEP] Aguardando {CHECK_INTERVAL}s...")
+        logger.info(f"[SLEEP] Aguardando {cfg.CHECK_INTERVAL}s...")
         try:
-            time.sleep(CHECK_INTERVAL)
+            time.sleep(cfg.CHECK_INTERVAL)
         except KeyboardInterrupt:
             logger.info("[STOP] Bot parado pelo usuario")
             break

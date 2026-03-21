@@ -7,10 +7,8 @@ import time
 import uuid
 from pybit.unified_trading import HTTP
 
-from config import (
-    BYBIT_API_KEY, BYBIT_API_SECRET, USE_TESTNET,
-    SYMBOL, LEVERAGE, RISK_PER_TRADE, DRY_RUN
-)
+import config as cfg
+import db
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +23,22 @@ class TradeExecutor:
     def __init__(self):
         self.client = self._create_client()
         self.active_trade = None
+        self._restore_active_trade()
 
     def _create_client(self) -> HTTP:
         return HTTP(
-            testnet=USE_TESTNET,
-            api_key=BYBIT_API_KEY,
-            api_secret=BYBIT_API_SECRET,
+            testnet=cfg.USE_TESTNET,
+            api_key=cfg.BYBIT_API_KEY,
+            api_secret=cfg.BYBIT_API_SECRET,
             recv_window=10000,
             timeout=30
         )
 
-    def _api_call(self, method, **kwargs):
+    def _api_call(self, method_name: str, **kwargs):
         """Executa chamada API com retry e reconexao."""
         for attempt in range(MAX_RETRIES):
             try:
+                method = getattr(self.client, method_name)
                 return method(**kwargs)
             except (ConnectionError, ConnectionResetError, OSError) as e:
                 logger.warning(f"[RETRY] Tentativa {attempt+1}/{MAX_RETRIES}: {e}")
@@ -48,9 +48,32 @@ class TradeExecutor:
                 else:
                     raise
 
+    def _restore_active_trade(self):
+        """Restaura active_trade do DB se houver trade aberto e posicao na exchange."""
+        try:
+            open_trade = db.get_open_trade()
+            if not open_trade:
+                return
+            pos = self._get_position()
+            if pos:
+                self.active_trade = {
+                    "side": pos["side"],
+                    "entry": pos["entry"],
+                    "sl": open_trade.get("stop_loss"),
+                    "tp": open_trade.get("take_profit"),
+                    "qty": pos["size"],
+                    "order_id": open_trade["order_id"],
+                }
+                logger.info(f"[RESTORE] Trade restaurado do DB: {open_trade['side']} {pos['size']} BTC")
+            else:
+                # Posicao nao existe mais, fechar trade orfao no DB
+                self.check_closed_by_exchange_for_order(open_trade["order_id"])
+        except Exception as e:
+            logger.warning(f"[RESTORE] Erro ao restaurar trade: {e}")
+
     def get_balance(self) -> float:
         result = self._api_call(
-            self.client.get_wallet_balance,
+            "get_wallet_balance",
             accountType="UNIFIED"
         )
         for coin in result["result"]["list"][0]["coin"]:
@@ -61,14 +84,19 @@ class TradeExecutor:
     def calc_position_size(self, entry: float, sl: float) -> float:
         """Calcula tamanho da posicao baseado no risco."""
         balance = self.get_balance()
-        risk_amount = balance * RISK_PER_TRADE
+        risk_amount = balance * cfg.RISK_PER_TRADE
         sl_dist = abs(entry - sl) / entry
         if sl_dist == 0:
             return 0.0
         notional = risk_amount / sl_dist
         qty = notional / entry
-        # Bybit min: 0.001 BTC
-        qty = max(0.001, round(qty, 3))
+        qty = round(qty, 3)
+        # Bybit min: 0.001 BTC — se qty minima excede o risco, avisar e pular
+        if qty < 0.001:
+            min_risk = 0.001 * abs(entry - sl)
+            logger.warning(f"[RISK] Qty calculada {qty} < minimo 0.001. "
+                           f"Risco minimo seria ${min_risk:,.2f} vs budget ${risk_amount:,.2f}")
+            qty = 0.001
         return qty
 
     def execute(self, decision: dict) -> str:
@@ -98,13 +126,13 @@ class TradeExecutor:
         sl = decision.get("stop_loss")
         tp = decision.get("take_profit")
 
-        if not all([entry, sl, tp]):
+        if entry is None or sl is None or tp is None:
             return "Entry/SL/TP nao definidos — ignorando"
 
         qty = self.calc_position_size(entry, sl)
         side = "Buy" if action == "LONG" else "Sell"
 
-        if DRY_RUN:
+        if cfg.DRY_RUN:
             self.active_trade = {
                 "side": side, "entry": entry, "sl": sl, "tp": tp,
                 "qty": qty, "reason": decision.get("reason", ""),
@@ -116,9 +144,9 @@ class TradeExecutor:
         try:
             link_id = f"{ORDER_PREFIX}-{uuid.uuid4().hex[:16]}"
             result = self._api_call(
-                self.client.place_order,
+                "place_order",
                 category="linear",
-                symbol=SYMBOL,
+                symbol=cfg.SYMBOL,
                 side=side,
                 orderType="Market",
                 qty=str(qty),
@@ -128,26 +156,40 @@ class TradeExecutor:
                 orderLinkId=link_id,
             )
             if result["retCode"] == 0:
+                order_id = result["result"]["orderId"]
+
+                # Buscar preco real de fill
+                real_entry = self._get_fill_price(order_id, fallback=entry)
+
                 self.active_trade = {
-                    "side": side, "entry": entry, "sl": sl, "tp": tp,
-                    "qty": qty, "order_id": result["result"]["orderId"],
+                    "side": side, "entry": real_entry, "sl": sl, "tp": tp,
+                    "qty": qty, "order_id": order_id,
                 }
-                return (f"{action} {qty} BTC @ market "
+                db.record_open(
+                    side=action, qty=qty, entry_price=real_entry,
+                    stop_loss=sl, take_profit=tp,
+                    confidence=decision.get("confidence", 0),
+                    reason=decision.get("reason", ""),
+                    order_id=order_id,
+                    llm_provider=cfg.LLM_PROVIDER,
+                    llm_model=self._get_llm_model(),
+                )
+                return (f"{action} {qty} BTC @ ${real_entry:,.2f} "
                         f"SL=${sl:,.2f} TP=${tp:,.2f} "
-                        f"OrderID={result['result']['orderId']}")
+                        f"OrderID={order_id}")
             else:
                 return f"Erro Bybit: {result['retMsg']}"
         except Exception as e:
             return f"Erro ao executar: {e}"
 
-    def _close_position(self) -> str:
+    def _close_position(self, close_type: str = "CLOSE") -> str:
         """Fecha posicao aberta."""
         pos = self._get_position()
         if not pos:
             self.active_trade = None
             return "Nenhuma posicao para fechar"
 
-        if DRY_RUN:
+        if cfg.DRY_RUN:
             self.active_trade = None
             return f"[DRY] Fechando {pos['side']} {pos['size']} BTC"
 
@@ -155,9 +197,9 @@ class TradeExecutor:
             close_side = "Sell" if pos["side"] == "Buy" else "Buy"
             link_id = f"{ORDER_PREFIX}-{uuid.uuid4().hex[:16]}"
             result = self._api_call(
-                self.client.place_order,
+                "place_order",
                 category="linear",
-                symbol=SYMBOL,
+                symbol=cfg.SYMBOL,
                 side=close_side,
                 orderType="Market",
                 qty=str(pos["size"]),
@@ -166,18 +208,52 @@ class TradeExecutor:
                 orderLinkId=link_id,
             )
             if result["retCode"] == 0:
+                close_order_id = result["result"]["orderId"]
+                # Buscar preco real de fechamento
+                exit_price = self._get_fill_price(close_order_id, fallback=pos["mark"])
+                pnl = self._calc_close_pnl(pos, exit_price)
+
+                if self.active_trade and self.active_trade.get("order_id"):
+                    db.record_close(
+                        order_id=self.active_trade["order_id"],
+                        exit_price=exit_price, pnl=pnl, close_type=close_type,
+                    )
                 self.active_trade = None
-                return f"Posicao fechada — OrderID={result['result']['orderId']}"
+                return f"Posicao fechada @ ${exit_price:,.2f} PnL=${pnl:+,.2f} — OrderID={close_order_id}"
             else:
                 return f"Erro ao fechar: {result['retMsg']}"
         except Exception as e:
             return f"Erro ao fechar: {e}"
 
+    def _get_fill_price(self, order_id: str, fallback: float) -> float:
+        """Busca preco real de fill de uma ordem."""
+        try:
+            time.sleep(0.5)  # Aguarda fill propagar
+            result = self._api_call(
+                "get_executions",
+                category="linear", symbol=cfg.SYMBOL, orderId=order_id, limit=1,
+            )
+            executions = result.get("result", {}).get("list", [])
+            if executions:
+                return float(executions[0]["execPrice"])
+        except Exception as e:
+            logger.warning(f"[FILL] Erro ao buscar fill price: {e}")
+        return fallback
+
+    def _calc_close_pnl(self, pos: dict, exit_price: float) -> float:
+        """Calcula PnL estimado do fechamento."""
+        entry = pos["entry"]
+        size = pos["size"]
+        if pos["side"] == "Buy":  # LONG
+            return (exit_price - entry) * size
+        else:  # SHORT
+            return (entry - exit_price) * size
+
     def _get_position(self) -> dict | None:
         """Retorna posicao aberta."""
         result = self._api_call(
-            self.client.get_positions,
-            category="linear", symbol=SYMBOL
+            "get_positions",
+            category="linear", symbol=cfg.SYMBOL
         )
         for p in result["result"]["list"]:
             if float(p["size"]) > 0:
@@ -185,5 +261,67 @@ class TradeExecutor:
                     "side": p["side"],
                     "size": float(p["size"]),
                     "entry": float(p["avgPrice"]),
+                    "mark": float(p.get("markPrice", p["avgPrice"])),
                 }
         return None
+
+    def check_closed_by_exchange(self):
+        """Verifica se a posicao foi fechada por TP/SL da Bybit e registra no DB."""
+        if not self.active_trade or not self.active_trade.get("order_id"):
+            return
+        pos = self._get_position()
+        if pos:
+            return  # ainda aberta
+
+        self.check_closed_by_exchange_for_order(self.active_trade["order_id"])
+        self.active_trade = None
+
+    def check_closed_by_exchange_for_order(self, order_id: str):
+        """Busca dados de fechamento para um order_id especifico."""
+        try:
+            # Buscar nas ordens do bot para encontrar o fechamento correto
+            orders = self._api_call(
+                "get_order_history",
+                category="linear", symbol=cfg.SYMBOL, limit=20,
+            )
+
+            # Encontrar a ordem de TP ou SL que foi Filled e pertence ao bot
+            close_type = None
+            for o in orders["result"]["list"]:
+                link = o.get("orderLinkId", "")
+                if o["orderStatus"] == "Filled" and o["stopOrderType"] in ("TakeProfit", "StopLoss"):
+                    close_type = "TP" if o["stopOrderType"] == "TakeProfit" else "SL"
+                    break
+
+            # Buscar PnL real no closed_pnl
+            closed = self._api_call(
+                "get_closed_pnl",
+                category="linear", symbol=cfg.SYMBOL, limit=5,
+            )
+            if closed["result"]["list"]:
+                t = closed["result"]["list"][0]
+                exit_price = float(t["avgExitPrice"])
+                pnl = float(t["closedPnl"])
+
+                if close_type is None:
+                    close_type = "TP" if pnl > 0 else "SL"
+
+                db.record_close(
+                    order_id=order_id,
+                    exit_price=exit_price, pnl=pnl, close_type=close_type,
+                )
+                logger.info(f"[DB] Posicao fechada pela Bybit ({close_type}): PnL ${pnl:+,.2f}")
+        except Exception as e:
+            logger.warning(f"[DB] Erro ao verificar fechamento: {e}")
+
+    def _get_llm_model(self) -> str:
+        """Retorna modelo LLM atual da config."""
+        try:
+            models = {
+                "google": cfg.GOOGLE_MODEL,
+                "anthropic": cfg.ANTHROPIC_MODEL,
+                "openai": cfg.OPENAI_MODEL,
+            }
+            return models.get(cfg.LLM_PROVIDER.lower(), "")
+        except Exception:
+            return ""

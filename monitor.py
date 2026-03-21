@@ -4,18 +4,21 @@ Uso: python monitor.py
 """
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
-from config import SYMBOL
+
+import config as cfg
 from executor import ORDER_PREFIX
+import db
 
 logger = logging.getLogger(__name__)
 
 
-def _api_call(client, method, **kwargs):
-    """Chamada API com retry."""
+def _api_call(client: HTTP, method_name: str, **kwargs):
+    """Chamada API com retry e reconexao."""
     for attempt in range(3):
         try:
+            method = getattr(client, method_name)
             return method(**kwargs)
         except (ConnectionError, ConnectionResetError, OSError) as e:
             logger.warning(f"[MONITOR RETRY] Tentativa {attempt+1}/3: {e}")
@@ -26,7 +29,7 @@ def _api_call(client, method, **kwargs):
 
 
 def show_balance(client: HTTP):
-    result = _api_call(client, client.get_wallet_balance, accountType="UNIFIED")
+    result = _api_call(client, "get_wallet_balance", accountType="UNIFIED")
     for coin in result["result"]["list"][0]["coin"]:
         if coin["coin"] == "USDT":
             balance = float(coin["walletBalance"])
@@ -36,94 +39,79 @@ def show_balance(client: HTTP):
 
 
 def show_position(client: HTTP):
-    result = _api_call(client, client.get_positions, category="linear", symbol=SYMBOL)
+    result = _api_call(client, "get_positions", category="linear", symbol=cfg.SYMBOL)
     for p in result["result"]["list"]:
         if float(p["size"]) > 0:
             entry = float(p["avgPrice"])
             mark = float(p["markPrice"])
             pnl = float(p["unrealisedPnl"])
-            sl = p.get("stopLoss", "0")
-            tp = p.get("takeProfit", "0")
+            sl_str = p.get("stopLoss") or ""
+            tp_str = p.get("takeProfit") or ""
+            sl = float(sl_str) if sl_str else 0.0
+            tp = float(tp_str) if tp_str else 0.0
             side = "SHORT" if p["side"] == "Sell" else "LONG"
             print(f"  {side} {p['size']} BTC @ ${entry:,.2f}")
             print(f"  Preco atual: ${mark:,.2f}")
-            print(f"  TP: ${float(tp):,.2f} | SL: ${float(sl):,.2f}")
+            if sl or tp:
+                print(f"  TP: ${tp:,.2f} | SL: ${sl:,.2f}")
             pnl_icon = "+" if pnl >= 0 else ""
             print(f"  PnL: {pnl_icon}${pnl:,.2f}")
             return
     print("  Nenhuma posicao aberta")
 
 
-def show_history(client: HTTP):
-    closed = _api_call(client, client.get_closed_pnl, category="linear", symbol=SYMBOL, limit=50)
-    orders = _api_call(client, client.get_order_history, category="linear", symbol=SYMBOL, limit=50)
-
-    # Mapear ordens do bot e TP/SL filled
-    bot_order_ids = set()
-    tp_sl_filled = {}
-    for o in orders["result"]["list"]:
-        link = o.get("orderLinkId", "")
-        if link.startswith(ORDER_PREFIX):
-            bot_order_ids.add(o["orderId"])
-        if o["orderStatus"] == "Filled" and o["stopOrderType"] in ("TakeProfit", "StopLoss"):
-            tp_sl_filled[o["createdTime"]] = o["stopOrderType"]
-
-    # Filtrar apenas trades do bot
-    trades = [t for t in closed["result"]["list"] if t.get("orderId") in bot_order_ids]
+def show_history():
+    trades = db.get_all_trades()
     if not trades:
-        print("  Sem trades do bot")
+        print("  Sem trades registrados")
         return
 
-    tp_count = 0
-    sl_count = 0
-    total_pnl = 0.0
-
-    header = f"  {'#':<3} {'Data':<16} {'Side':<6} {'Qty':<8} {'Entry':>11} {'Exit':>11} {'PnL':>9} {'Tipo'}"
+    header = f"  {'#':<3} {'Data':<16} {'Side':<6} {'Qty':<8} {'Entry':>11} {'Exit':>11} {'PnL':>9} {'Tipo':<6} {'LLM'}"
     print(header)
-    print("  " + "-" * 78)
+    print("  " + "-" * 90)
 
-    for i, t in enumerate(reversed(trades)):
-        dt = datetime.fromtimestamp(int(t["updatedTime"]) / 1000)
-        pnl = float(t["closedPnl"])
-        total_pnl += pnl
-
-        # side no closed PnL e o lado de fechamento, inverter para abertura
-        side = "SHORT" if t["side"] == "Buy" else "LONG"
-
-        # Determinar TP ou SL
-        created = t["createdTime"]
-        if created in tp_sl_filled:
-            tipo = "TP" if tp_sl_filled[created] == "TakeProfit" else "SL"
-        elif pnl > 0:
-            tipo = "TP*"
-        else:
-            tipo = "SL*"
-
-        if "TP" in tipo:
-            tp_count += 1
-        else:
-            sl_count += 1
+    for i, t in enumerate(trades):
+        opened = t["opened_at"]
+        # Compativel com Python < 3.11 (remove +00:00 se presente)
+        if opened.endswith("+00:00"):
+            opened = opened.replace("+00:00", "")
+        dt = datetime.fromisoformat(opened)
+        pnl = t["pnl"] if t["pnl"] is not None else 0.0
+        exit_p = t["exit_price"] if t["exit_price"] is not None else 0.0
+        close_type = t.get("close_type") or "?"
+        llm = t.get("llm_provider") or ""
 
         print(
-            f"  {i+1:<3} {dt.strftime('%d/%m %H:%M'):<16} {side:<6} {t['qty']:<8}"
-            f" {float(t['avgEntryPrice']):>11,.2f} {float(t['avgExitPrice']):>11,.2f}"
-            f" {pnl:>+9.2f} {tipo}"
+            f"  {i+1:<3} {dt.strftime('%d/%m %H:%M'):<16} {t['side']:<6} {t['qty']:<8}"
+            f" {t['entry_price']:>11,.2f} {exit_p:>11,.2f}"
+            f" {pnl:>+9.2f} {close_type:<6} {llm}"
         )
 
-    print("  " + "-" * 78)
-    total = tp_count + sl_count
-    wr = (tp_count / total * 100) if total > 0 else 0
-    print(f"  Trades: {total} | TP: {tp_count} | SL: {sl_count} | Win rate: {wr:.1f}%")
-    print(f"  PnL total: ${total_pnl:+,.2f}")
-    print()
-    print("  * = inferido pelo PnL (sem match exato na ordem)")
+    print("  " + "-" * 90)
+
+
+def show_stats():
+    stats = db.get_stats()
+    if not stats:
+        print("  Sem dados para estatisticas")
+        return
+
+    print(f"  Trades: {stats['total_trades']} | Wins: {stats['win_count']} | Losses: {stats['loss_count']}")
+    print(f"  Win rate: {stats['win_rate']:.1f}%")
+    print(f"  PnL total: ${stats['total_pnl']:+,.2f}")
+    print(f"  Media win: ${stats['avg_win']:+,.2f} | Media loss: ${stats['avg_loss']:+,.2f}")
+    pf = stats['profit_factor']
+    pf_str = f"{pf:.2f}" if pf != float("inf") else "inf"
+    print(f"  Profit factor: {pf_str}")
+    print(f"  Max drawdown: ${stats['max_drawdown']:,.2f}")
+    print(f"  Fechamentos: TP={stats['tp_count']} | SL={stats['sl_count']} | CLOSE={stats['close_count']}")
 
 
 def show_status(client: HTTP):
     """Exibe status completo: conta, posicao e historico."""
     print()
     print("=" * 50)
-    print(f"  MONITOR — {SYMBOL}")
+    print(f"  MONITOR — {cfg.SYMBOL}")
     print(f"  {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
     print("=" * 50)
 
@@ -137,18 +125,23 @@ def show_status(client: HTTP):
 
     print()
     print(">> HISTORICO DE TRADES")
-    show_history(client)
+    show_history()
+
+    print()
+    print(">> ESTATISTICAS")
+    show_stats()
     print()
 
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
-    from config import BYBIT_API_KEY, BYBIT_API_SECRET, USE_TESTNET
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)-8s | %(message)s')
+    db.init_db()
     client = HTTP(
-        testnet=USE_TESTNET,
-        api_key=BYBIT_API_KEY,
-        api_secret=BYBIT_API_SECRET,
+        testnet=cfg.USE_TESTNET,
+        api_key=cfg.BYBIT_API_KEY,
+        api_secret=cfg.BYBIT_API_SECRET,
         recv_window=10000,
         timeout=30,
     )
