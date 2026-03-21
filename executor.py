@@ -48,16 +48,6 @@ class TradeExecutor:
                     self.client = self._create_client()
                 else:
                     raise
-            except Exception as e:
-                if "retryable" in str(e).lower() or "recv_window" in str(e).lower():
-                    # Nao recriar client — pybit ajusta timestamp_offset internamente
-                    logger.warning(f"[RETRY] Tentativa {attempt+1}/{MAX_RETRIES} (timestamp): {e}")
-                    if attempt < MAX_RETRIES - 1:
-                        time.sleep(RETRY_DELAY * (2 ** attempt))
-                    else:
-                        raise
-                else:
-                    raise
 
     def _restore_active_trade(self):
         """Restaura active_trade do DB se houver trade aberto e posicao na exchange."""

@@ -23,6 +23,7 @@ except Exception:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 import config as cfg
+from pybit.unified_trading import HTTP
 from market_data import MarketData
 from analyst import create_analyst
 from executor import TradeExecutor
@@ -44,6 +45,25 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+
+def _sync_bybit_time():
+    """Sincroniza timestamp local com servidor Bybit via monkey-patch."""
+    try:
+        import pybit._helpers as _helpers
+        client = HTTP(testnet=cfg.USE_TESTNET)
+        result = client.get_server_time()
+        server_ms = int(result["result"]["timeSecond"]) * 1000
+        local_ms = int(time.time() * 1000)
+        offset = server_ms - local_ms
+        if abs(offset) > 500:  # Mais de 500ms de drift
+            _original = _helpers.generate_timestamp
+            _helpers.generate_timestamp = lambda: _original() + offset
+            logger.info(f"[SYNC] Clock drift detectado: {offset:+d}ms — timestamp ajustado")
+        else:
+            logger.info(f"[SYNC] Clock OK (drift: {offset:+d}ms)")
+    except Exception as e:
+        logger.warning(f"[SYNC] Falha ao sincronizar timestamp: {e}")
 
 
 def print_banner(dry_run: bool, analyst):
@@ -78,6 +98,9 @@ def main():
             logger.error("[CONFIG] BYBIT_API_KEY e BYBIT_API_SECRET obrigatorias no modo --live")
             sys.exit(1)
     dry_run = cfg.DRY_RUN
+
+    # Sincronizar timestamp com servidor Bybit (corrige clock drift)
+    _sync_bybit_time()
 
     # Init components
     db.init_db()
