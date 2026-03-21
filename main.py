@@ -177,10 +177,11 @@ def main():
             logger.info("[ONCE] Modo --once, saindo")
             break
 
-        # Sleep — em chunks de 1s para ser interrompivel no Windows
-        logger.info(f"[SLEEP] Aguardando {cfg.CHECK_INTERVAL}s...")
+        # Sleep — intervalo dinamico: 60s com posicao aberta, CHECK_INTERVAL sem
+        interval = 60 if executor.active_trade else cfg.CHECK_INTERVAL
+        logger.info(f"[SLEEP] Aguardando {interval}s{'  (posicao aberta)' if executor.active_trade else ''}...")
         try:
-            for _ in range(cfg.CHECK_INTERVAL):
+            for _ in range(interval):
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("[STOP] Bot parado pelo usuario")
