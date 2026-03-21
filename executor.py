@@ -225,11 +225,13 @@ class TradeExecutor:
                 db_ok = False
                 if self.active_trade and self.active_trade.get("order_id"):
                     try:
-                        db.record_close(
+                        updated = db.record_close(
                             order_id=self.active_trade["order_id"],
                             exit_price=exit_price, pnl=pnl, close_type=close_type,
                         )
-                        db_ok = True
+                        db_ok = updated
+                        if not updated:
+                            logger.warning(f"[DB] record_close retornou False — trade ja fechado ou order_id nao encontrado")
                     except Exception as e:
                         logger.error(f"[DB] Falha ao registrar fechamento order_id={self.active_trade.get('order_id')}: {e}")
                 if db_ok or not self.active_trade:
@@ -238,6 +240,11 @@ class TradeExecutor:
                     logger.warning("[STATE] active_trade mantido — DB nao confirmou fechamento")
                 return f"Posicao fechada @ ${exit_price:,.2f} PnL=${pnl:+,.2f} — OrderID={close_order_id}"
             else:
+                # Posicao pode ter sido fechada entre get_position e place_order
+                recheck = self._get_position()
+                if not recheck:
+                    logger.warning(f"[CLOSE] Ordem falhou ({result['retMsg']}) mas posicao ja fechada — reconciliando")
+                    self.check_closed_by_exchange()
                 return f"Erro ao fechar: {result['retMsg']}"
         except Exception as e:
             return f"Erro ao fechar: {e}"
@@ -326,25 +333,21 @@ class TradeExecutor:
                 if t.get("orderId") == order_id:
                     matched = t
                     break
-            # Fallback: usar o mais recente se nao encontrou pelo orderId
-            if not matched and closed["result"]["list"]:
-                matched = closed["result"]["list"][0]
-                logger.warning(f"[DB] closed_pnl nao encontrado para order_id={order_id}, usando mais recente")
 
-            if matched:
-                exit_price = float(matched["avgExitPrice"])
-                pnl = float(matched["closedPnl"])
+            if not matched:
+                raise RuntimeError(f"closed_pnl nao encontrado para order_id={order_id}")
 
-                if close_type is None:
-                    close_type = "TP" if pnl > 0 else "SL"
+            exit_price = float(matched["avgExitPrice"])
+            pnl = float(matched["closedPnl"])
 
-                db.record_close(
-                    order_id=order_id,
-                    exit_price=exit_price, pnl=pnl, close_type=close_type,
-                )
-                logger.info(f"[DB] Posicao fechada pela Bybit ({close_type}): PnL ${pnl:+,.2f}")
-            else:
-                logger.warning(f"[DB] Nenhum closed_pnl encontrado para order_id={order_id}")
+            if close_type is None:
+                close_type = "EXCHANGE"
+
+            db.record_close(
+                order_id=order_id,
+                exit_price=exit_price, pnl=pnl, close_type=close_type,
+            )
+            logger.info(f"[DB] Posicao fechada pela Bybit ({close_type}): PnL ${pnl:+,.2f}")
         except Exception as e:
             raise RuntimeError(f"Erro ao verificar fechamento: {e}") from e
 

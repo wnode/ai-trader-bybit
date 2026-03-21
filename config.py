@@ -76,7 +76,7 @@ MIN_CONFIDENCE = _get_float("MIN_CONFIDENCE", "0.7")
 ADX_RANGING_THRESHOLD = _get_float("ADX_RANGING_THRESHOLD", "15")
 
 # LLM Provider
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").strip().lower()
 
 # Anthropic (Claude)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -92,7 +92,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # Validacoes
 VALID_PROVIDERS = ("google", "anthropic", "openai")
-if LLM_PROVIDER.lower() not in VALID_PROVIDERS:
+if LLM_PROVIDER not in VALID_PROVIDERS:
     print(f"[CONFIG] ERRO: LLM_PROVIDER deve ser um de {VALID_PROVIDERS} (valor: '{LLM_PROVIDER}')")
     sys.exit(1)
 
@@ -129,6 +129,6 @@ _provider_keys = {
     "anthropic": ANTHROPIC_API_KEY,
     "openai": OPENAI_API_KEY,
 }
-if not _provider_keys.get(LLM_PROVIDER.lower()):
+if not _provider_keys.get(LLM_PROVIDER):
     print(f"[CONFIG] ERRO: API key para {LLM_PROVIDER} nao configurada")
     sys.exit(1)

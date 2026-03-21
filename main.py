@@ -157,10 +157,11 @@ def main():
             logger.info("[ONCE] Modo --once, saindo")
             break
 
-        # Sleep
+        # Sleep — em chunks de 1s para ser interrompivel no Windows
         logger.info(f"[SLEEP] Aguardando {cfg.CHECK_INTERVAL}s...")
         try:
-            time.sleep(cfg.CHECK_INTERVAL)
+            for _ in range(cfg.CHECK_INTERVAL):
+                time.sleep(1)
         except KeyboardInterrupt:
             logger.info("[STOP] Bot parado pelo usuario")
             break
