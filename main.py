@@ -110,12 +110,6 @@ def main():
 
     print_banner(dry_run, analyst)
 
-    # Status inicial: conta, posicao e historico
-    try:
-        show_status(executor.client)
-    except Exception as e:
-        logger.warning(f"[MONITOR] Erro ao exibir status: {e}")
-
     # Handler para SIGTERM (shutdown gracioso)
     def _signal_handler(signum, frame):
         logger.info(f"[SIGNAL] Sinal {signum} recebido, encerrando...")
@@ -133,7 +127,10 @@ def main():
         try:
             iteration += 1
             now = datetime.now(timezone.utc)
-            logger.info(f"{'='*60}")
+
+            # Limpa tela — informacoes atualizam in-place
+            os.system("cls" if os.name == "nt" else "clear")
+            print_banner(dry_run, analyst)
             logger.info(f"[ITER {iteration}] {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
             # 0. Verifica se posicao foi fechada por TP/SL da Bybit
