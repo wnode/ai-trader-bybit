@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def _api_call(client: HTTP, method_name: str, **kwargs):
-    """Chamada API com retry e reconexao."""
+    """Chamada API com retry e backoff exponencial."""
     for attempt in range(3):
         try:
             method = getattr(client, method_name)
@@ -23,7 +23,7 @@ def _api_call(client: HTTP, method_name: str, **kwargs):
         except (ConnectionError, ConnectionResetError, OSError) as e:
             logger.warning(f"[MONITOR RETRY] Tentativa {attempt+1}/3: {e}")
             if attempt < 2:
-                time.sleep(2)
+                time.sleep(2 * (2 ** attempt))
             else:
                 raise
 

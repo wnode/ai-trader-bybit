@@ -35,7 +35,7 @@ class TradeExecutor:
         )
 
     def _api_call(self, method_name: str, **kwargs):
-        """Executa chamada API com retry e reconexao."""
+        """Executa chamada API com retry, backoff exponencial e reconexao."""
         for attempt in range(MAX_RETRIES):
             try:
                 method = getattr(self.client, method_name)
@@ -43,7 +43,7 @@ class TradeExecutor:
             except (ConnectionError, ConnectionResetError, OSError) as e:
                 logger.warning(f"[RETRY] Tentativa {attempt+1}/{MAX_RETRIES}: {e}")
                 if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY)
+                    time.sleep(RETRY_DELAY * (2 ** attempt))
                     self.client = self._create_client()
                 else:
                     raise
@@ -91,12 +91,12 @@ class TradeExecutor:
         notional = risk_amount / sl_dist
         qty = notional / entry
         qty = round(qty, 3)
-        # Bybit min: 0.001 BTC — se qty minima excede o risco, avisar e pular
+        # Bybit min: 0.001 BTC — se qty minima excede o risco, pular trade
         if qty < 0.001:
             min_risk = 0.001 * abs(entry - sl)
             logger.warning(f"[RISK] Qty calculada {qty} < minimo 0.001. "
                            f"Risco minimo seria ${min_risk:,.2f} vs budget ${risk_amount:,.2f}")
-            qty = 0.001
+            return 0.0
         return qty
 
     def execute(self, decision: dict) -> str:
@@ -130,6 +130,9 @@ class TradeExecutor:
             return "Entry/SL/TP nao definidos — ignorando"
 
         qty = self.calc_position_size(entry, sl)
+        if qty <= 0:
+            return "Qty zero — risco muito baixo para abrir posicao"
+
         side = "Buy" if action == "LONG" else "Sell"
 
         if cfg.DRY_RUN:
@@ -165,15 +168,18 @@ class TradeExecutor:
                     "side": side, "entry": real_entry, "sl": sl, "tp": tp,
                     "qty": qty, "order_id": order_id,
                 }
-                db.record_open(
-                    side=action, qty=qty, entry_price=real_entry,
-                    stop_loss=sl, take_profit=tp,
-                    confidence=decision.get("confidence", 0),
-                    reason=decision.get("reason", ""),
-                    order_id=order_id,
-                    llm_provider=cfg.LLM_PROVIDER,
-                    llm_model=self._get_llm_model(),
-                )
+                try:
+                    db.record_open(
+                        side=action, qty=qty, entry_price=real_entry,
+                        stop_loss=sl, take_profit=tp,
+                        confidence=decision.get("confidence", 0),
+                        reason=decision.get("reason", ""),
+                        order_id=order_id,
+                        llm_provider=cfg.LLM_PROVIDER,
+                        llm_model=self._get_llm_model(),
+                    )
+                except Exception as e:
+                    logger.error(f"[DB] Falha ao registrar abertura no DB (posicao JA aberta na exchange): {e}")
                 return (f"{action} {qty} BTC @ ${real_entry:,.2f} "
                         f"SL=${sl:,.2f} TP=${tp:,.2f} "
                         f"OrderID={order_id}")

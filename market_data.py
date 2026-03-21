@@ -33,7 +33,7 @@ class MarketData:
         )
 
     def _api_call(self, method_name: str, **kwargs):
-        """Executa chamada API com retry e reconexao."""
+        """Executa chamada API com retry, backoff exponencial e reconexao."""
         for attempt in range(MAX_RETRIES):
             try:
                 method = getattr(self.client, method_name)
@@ -41,7 +41,7 @@ class MarketData:
             except (ConnectionError, ConnectionResetError, OSError) as e:
                 logger.warning(f"[RETRY] Tentativa {attempt+1}/{MAX_RETRIES}: {e}")
                 if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY)
+                    time.sleep(RETRY_DELAY * (2 ** attempt))
                     self.client = self._create_client()
                 else:
                     raise
@@ -86,7 +86,7 @@ class MarketData:
         avg_loss = loss_raw.ewm(alpha=1/rsi_p, min_periods=rsi_p, adjust=False).mean()
         rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
-        rsi = rsi.fillna(100)
+        rsi = rsi.fillna(50)  # Neutro ate ter dados suficientes
 
         # MACD
         ema_fast = close.ewm(span=cfg.MACD_FAST, adjust=False).mean()
@@ -103,6 +103,7 @@ class MarketData:
             (low - close.shift()).abs()
         ], axis=1).max(axis=1)
         atr = tr.ewm(alpha=1/atr_p, min_periods=atr_p, adjust=False).mean()
+        atr = atr.replace(0, np.nan)  # Evita divisao por zero no DI
 
         # ADX — corrigido: mutual exclusion antes de zerar negativos
         adx_p = cfg.ADX_PERIOD
@@ -124,8 +125,9 @@ class MarketData:
         adx = dx.ewm(alpha=1/adx_p, min_periods=adx_p, adjust=False).mean()
 
         # Bollinger Bands (ddof=0 para population std)
-        bb_mid = close.rolling(cfg.BB_PERIOD).mean()
-        bb_std = close.rolling(cfg.BB_PERIOD).std(ddof=0)
+        bb_period = min(cfg.BB_PERIOD, len(close))
+        bb_mid = close.rolling(bb_period).mean()
+        bb_std = close.rolling(bb_period).std(ddof=0)
         bb_upper = bb_mid + cfg.BB_STD * bb_std
         bb_lower = bb_mid - cfg.BB_STD * bb_std
 
@@ -148,13 +150,15 @@ class MarketData:
         )
         for p in result["result"]["list"]:
             if float(p["size"]) > 0:
+                sl_val = p.get("stopLoss") or ""
+                tp_val = p.get("takeProfit") or ""
                 return {
                     "side": p["side"],
                     "size": float(p["size"]),
                     "entry": float(p["avgPrice"]),
                     "pnl": float(p["unrealisedPnl"]),
-                    "sl": float(p["stopLoss"]) if p.get("stopLoss") else None,
-                    "tp": float(p["takeProfit"]) if p.get("takeProfit") else None,
+                    "sl": float(sl_val) if sl_val.strip() else None,
+                    "tp": float(tp_val) if tp_val.strip() else None,
                 }
         return None
 

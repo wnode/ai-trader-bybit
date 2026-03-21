@@ -4,6 +4,7 @@ Suporta: Anthropic (Claude), Google (Gemini), OpenAI (GPT)
 """
 import json
 import re
+import math
 import logging
 
 import config as cfg
@@ -81,9 +82,11 @@ class BaseAnalyst:
             decision = self._parse_json(text)
 
             # Garante que confidence e numerico
+            raw_conf = decision.get("confidence", 0)
             try:
-                decision["confidence"] = float(decision.get("confidence", 0))
+                decision["confidence"] = float(raw_conf)
             except (TypeError, ValueError):
+                logger.warning(f"[{self.provider_name}] Confidence nao-numerico: {raw_conf}, usando 0.0")
                 decision["confidence"] = 0.0
 
             # Validacao de action
@@ -103,6 +106,11 @@ class BaseAnalyst:
 
                 if entry is None or sl is None or tp is None:
                     logger.warning(f"[{self.provider_name}] Entry/SL/TP ausentes, convertendo para HOLD")
+                    decision["action"] = "HOLD"
+                elif not all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0
+                             for v in (entry, sl, tp)):
+                    logger.warning(f"[{self.provider_name}] Entry/SL/TP invalidos (nao-finito ou <= 0): "
+                                   f"entry={entry} sl={sl} tp={tp}")
                     decision["action"] = "HOLD"
                 elif decision["action"] == "LONG" and (sl >= entry or tp <= entry):
                     logger.warning(f"[{self.provider_name}] SL/TP invalidos para LONG: SL={sl} Entry={entry} TP={tp}")

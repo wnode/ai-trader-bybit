@@ -12,6 +12,7 @@ import os
 import sys
 import io
 import time
+import signal
 import logging
 import argparse
 from datetime import datetime, timezone
@@ -73,6 +74,9 @@ def main():
 
     if args.live:
         cfg.DRY_RUN = False
+        if not cfg.BYBIT_API_KEY:
+            logger.error("[CONFIG] BYBIT_API_KEY obrigatoria no modo --live")
+            sys.exit(1)
     dry_run = cfg.DRY_RUN
 
     # Init components
@@ -89,7 +93,16 @@ def main():
     except Exception as e:
         logger.warning(f"[MONITOR] Erro ao exibir status: {e}")
 
+    # Handler para SIGTERM (shutdown gracioso)
+    def _signal_handler(signum, frame):
+        logger.info(f"[SIGNAL] Sinal {signum} recebido, encerrando...")
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     iteration = 0
+    consecutive_errors = 0
+    max_consecutive_errors = 5
 
     logger.info(f"[START] AI Trader iniciado | {analyst.provider_name} {analyst.model} | {'DRY RUN' if dry_run else 'LIVE'}")
 
@@ -125,12 +138,17 @@ def main():
                 logger.warning(f"[MONITOR] Erro ao exibir status: {e}")
 
             logger.info(f"[STATS] Iteracao {iteration} completa")
+            consecutive_errors = 0
 
         except KeyboardInterrupt:
             logger.info("[STOP] Bot parado pelo usuario")
             break
         except Exception as e:
-            logger.error(f"[ERROR] {e}", exc_info=True)
+            consecutive_errors += 1
+            logger.error(f"[ERROR] ({consecutive_errors}/{max_consecutive_errors}) {e}", exc_info=True)
+            if consecutive_errors >= max_consecutive_errors:
+                logger.critical(f"[FATAL] {max_consecutive_errors} erros consecutivos, encerrando bot")
+                break
 
         if args.once:
             logger.info("[ONCE] Modo --once, saindo")

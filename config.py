@@ -27,15 +27,27 @@ def _get_float(key: str, default: str) -> float:
         sys.exit(1)
 
 
+def _get_bool(key: str, default: str) -> bool:
+    val = os.getenv(key, default).lower()
+    if val not in ("true", "false"):
+        print(f"[CONFIG] ERRO: {key} deve ser 'true' ou 'false' (valor: '{val}')")
+        sys.exit(1)
+    return val == "true"
+
+
 # Bybit
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+USE_TESTNET = _get_bool("USE_TESTNET", "true")
+DRY_RUN = _get_bool("DRY_RUN", "true")
 
 # Trading
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 TIMEFRAME = os.getenv("TIMEFRAME", "15")
+VALID_TIMEFRAMES = ("1", "3", "5", "15", "30", "60", "120", "240", "360", "720", "D", "W", "M")
+if TIMEFRAME not in VALID_TIMEFRAMES:
+    print(f"[CONFIG] ERRO: TIMEFRAME deve ser um de {VALID_TIMEFRAMES} (valor: '{TIMEFRAME}')")
+    sys.exit(1)
 CHECK_INTERVAL = _get_int("CHECK_INTERVAL", "300")
 LEVERAGE = _get_int("LEVERAGE", "25")
 RISK_PER_TRADE = _get_float("RISK_PER_TRADE", "0.0001")
@@ -98,6 +110,14 @@ if CHECK_INTERVAL < 10:
 
 if not DRY_RUN and not BYBIT_API_KEY:
     print("[CONFIG] ERRO: BYBIT_API_KEY obrigatoria no modo LIVE")
+    sys.exit(1)
+
+if SL_MIN_PCT >= SL_MAX_PCT:
+    print(f"[CONFIG] ERRO: SL_MIN_PCT ({SL_MIN_PCT}) deve ser menor que SL_MAX_PCT ({SL_MAX_PCT})")
+    sys.exit(1)
+
+if MACD_FAST >= MACD_SLOW:
+    print(f"[CONFIG] ERRO: MACD_FAST ({MACD_FAST}) deve ser menor que MACD_SLOW ({MACD_SLOW})")
     sys.exit(1)
 
 _provider_keys = {

@@ -13,18 +13,26 @@ DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(DB_DIR, "trades.db")
 
 
+SCHEMA_VERSION = 1
+
+
 def _connect() -> sqlite3.Connection:
     os.makedirs(DB_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
 def init_db():
-    """Cria tabela de trades se nao existir."""
+    """Cria tabelas e aplica migracoes se necessario."""
     conn = _connect()
     try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER NOT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,10 +53,16 @@ def init_db():
                 llm_model TEXT
             )
         """)
+        row = conn.execute("SELECT version FROM schema_version").fetchone()
+        if not row:
+            conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+        elif row[0] < SCHEMA_VERSION:
+            # Migracoes futuras aqui
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
         conn.commit()
     finally:
         conn.close()
-    logger.info(f"[DB] Banco inicializado: {DB_PATH}")
+    logger.info(f"[DB] Banco inicializado (v{SCHEMA_VERSION}): {DB_PATH}")
 
 
 def record_open(side: str, qty: float, entry_price: float,
@@ -123,9 +137,11 @@ def get_open_trade() -> dict | None:
     finally:
         conn.close()
 
+    if not rows:
+        return None
     if len(rows) > 1:
         logger.warning(f"[DB] {len(rows)} trades abertos encontrados — usando o mais recente")
-    return dict(rows[0]) if rows else None
+    return dict(rows[0])
 
 
 def get_stats() -> dict:
@@ -139,7 +155,7 @@ def get_stats() -> dict:
         return {}
 
     wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p <= 0]
+    losses = [p for p in pnls if p < 0]
 
     total_trades = len(pnls)
     total_pnl = sum(pnls)
