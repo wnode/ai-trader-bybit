@@ -7,6 +7,7 @@ import time
 import pandas as pd
 import numpy as np
 from pybit.unified_trading import HTTP
+from pybit.exceptions import FailedRequestError
 from datetime import datetime, timezone
 
 import config as cfg
@@ -38,7 +39,7 @@ class MarketData:
             try:
                 method = getattr(self.client, method_name)
                 return method(**kwargs)
-            except (ConnectionError, ConnectionResetError, OSError) as e:
+            except (ConnectionError, ConnectionResetError, OSError, FailedRequestError) as e:
                 logger.warning(f"[RETRY] Tentativa {attempt+1}/{MAX_RETRIES}: {e}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY * (2 ** attempt))
@@ -55,6 +56,9 @@ class MarketData:
             category="linear", symbol=cfg.SYMBOL,
             interval=interval, limit=limit
         )
+        if not result or result.get("retCode") != 0:
+            msg = result.get("retMsg", "unknown") if result else "sem resposta"
+            raise RuntimeError(f"Erro API get_kline: {msg}")
         rows = []
         for k in result["result"]["list"]:
             ts, o, h, l, c, vol, turnover = k
@@ -118,8 +122,11 @@ class MarketData:
 
         smooth_plus_dm = plus_dm.ewm(alpha=1/adx_p, min_periods=adx_p, adjust=False).mean()
         smooth_minus_dm = minus_dm.ewm(alpha=1/adx_p, min_periods=adx_p, adjust=False).mean()
-        plus_di = 100 * (smooth_plus_dm / atr)
-        minus_di = 100 * (smooth_minus_dm / atr)
+        # ATR para DI usa mesmo periodo do ADX (pode diferir do ATR_PERIOD)
+        atr_for_adx = tr.ewm(alpha=1/adx_p, min_periods=adx_p, adjust=False).mean()
+        atr_for_adx = atr_for_adx.replace(0, np.finfo(float).eps)
+        plus_di = 100 * (smooth_plus_dm / atr_for_adx)
+        minus_di = 100 * (smooth_minus_dm / atr_for_adx)
         di_sum = plus_di + minus_di
         dx = 100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan)
         dx = dx.fillna(0)
@@ -150,6 +157,9 @@ class MarketData:
             "get_positions",
             category="linear", symbol=cfg.SYMBOL
         )
+        if not result or result.get("retCode") != 0:
+            msg = result.get("retMsg", "unknown") if result else "sem resposta"
+            raise RuntimeError(f"Erro API get_positions: {msg}")
         for p in result["result"]["list"]:
             if float(p["size"]) > 0:
                 sl_val = p.get("stopLoss") or ""
@@ -170,6 +180,9 @@ class MarketData:
             "get_wallet_balance",
             accountType="UNIFIED"
         )
+        if not result or result.get("retCode") != 0:
+            msg = result.get("retMsg", "unknown") if result else "sem resposta"
+            raise RuntimeError(f"Erro API get_wallet_balance: {msg}")
         for coin in result["result"]["list"][0]["coin"]:
             if coin["coin"] == "USDT":
                 return float(coin["walletBalance"])

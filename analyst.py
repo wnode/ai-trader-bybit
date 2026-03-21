@@ -233,6 +233,8 @@ class GoogleAnalyst(BaseAnalyst):
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
+        if not response.text:
+            raise ValueError("Resposta vazia da API Google")
         text = response.text.strip()
         input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
         output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)

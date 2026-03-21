@@ -6,6 +6,7 @@ import time
 import logging
 from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
+from pybit.exceptions import FailedRequestError
 
 import config as cfg
 from executor import ORDER_PREFIX
@@ -20,7 +21,7 @@ def _api_call(client: HTTP, method_name: str, **kwargs):
         try:
             method = getattr(client, method_name)
             return method(**kwargs)
-        except (ConnectionError, ConnectionResetError, OSError) as e:
+        except (ConnectionError, ConnectionResetError, OSError, FailedRequestError) as e:
             logger.warning(f"[MONITOR RETRY] Tentativa {attempt+1}/3: {e}")
             if attempt < 2:
                 time.sleep(2 * (2 ** attempt))

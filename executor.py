@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 from pybit.unified_trading import HTTP
+from pybit.exceptions import FailedRequestError
 
 import config as cfg
 import db
@@ -40,7 +41,7 @@ class TradeExecutor:
             try:
                 method = getattr(self.client, method_name)
                 return method(**kwargs)
-            except (ConnectionError, ConnectionResetError, OSError) as e:
+            except (ConnectionError, ConnectionResetError, OSError, FailedRequestError) as e:
                 logger.warning(f"[RETRY] Tentativa {attempt+1}/{MAX_RETRIES}: {e}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY * (2 ** attempt))
@@ -289,8 +290,11 @@ class TradeExecutor:
         if pos:
             return  # ainda aberta
 
-        self.check_closed_by_exchange_for_order(self.active_trade["order_id"])
-        self.active_trade = None
+        try:
+            self.check_closed_by_exchange_for_order(self.active_trade["order_id"])
+            self.active_trade = None
+        except Exception as e:
+            logger.warning(f"[STATE] Erro ao registrar fechamento no DB — active_trade mantido: {e}")
 
     def check_closed_by_exchange_for_order(self, order_id: str):
         """Busca dados de fechamento para um order_id especifico."""
@@ -301,23 +305,35 @@ class TradeExecutor:
                 category="linear", symbol=cfg.SYMBOL, limit=20,
             )
 
-            # Encontrar a ordem de TP ou SL que foi Filled e pertence ao bot
+            # Encontrar a ordem de TP ou SL que foi Filled
+            # Filtra por ordens do bot (prefixo aitbot) para evitar casar com ordens de terceiros
             close_type = None
             for o in orders["result"]["list"]:
                 link = o.get("orderLinkId", "")
-                if o["orderStatus"] == "Filled" and o["stopOrderType"] in ("TakeProfit", "StopLoss"):
+                if (o["orderStatus"] == "Filled"
+                        and o["stopOrderType"] in ("TakeProfit", "StopLoss")
+                        and link.startswith(ORDER_PREFIX)):
                     close_type = "TP" if o["stopOrderType"] == "TakeProfit" else "SL"
                     break
 
-            # Buscar PnL real no closed_pnl
+            # Buscar PnL real no closed_pnl — filtrar pelo orderId de abertura
             closed = self._api_call(
                 "get_closed_pnl",
-                category="linear", symbol=cfg.SYMBOL, limit=5,
+                category="linear", symbol=cfg.SYMBOL, limit=10,
             )
-            if closed["result"]["list"]:
-                t = closed["result"]["list"][0]
-                exit_price = float(t["avgExitPrice"])
-                pnl = float(t["closedPnl"])
+            matched = None
+            for t in closed["result"]["list"]:
+                if t.get("orderId") == order_id:
+                    matched = t
+                    break
+            # Fallback: usar o mais recente se nao encontrou pelo orderId
+            if not matched and closed["result"]["list"]:
+                matched = closed["result"]["list"][0]
+                logger.warning(f"[DB] closed_pnl nao encontrado para order_id={order_id}, usando mais recente")
+
+            if matched:
+                exit_price = float(matched["avgExitPrice"])
+                pnl = float(matched["closedPnl"])
 
                 if close_type is None:
                     close_type = "TP" if pnl > 0 else "SL"
@@ -327,8 +343,10 @@ class TradeExecutor:
                     exit_price=exit_price, pnl=pnl, close_type=close_type,
                 )
                 logger.info(f"[DB] Posicao fechada pela Bybit ({close_type}): PnL ${pnl:+,.2f}")
+            else:
+                logger.warning(f"[DB] Nenhum closed_pnl encontrado para order_id={order_id}")
         except Exception as e:
-            logger.warning(f"[DB] Erro ao verificar fechamento: {e}")
+            raise RuntimeError(f"Erro ao verificar fechamento: {e}") from e
 
     def _get_llm_model(self) -> str:
         """Retorna modelo LLM atual da config."""

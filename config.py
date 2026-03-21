@@ -108,8 +108,8 @@ if CHECK_INTERVAL < 10:
     print(f"[CONFIG] ERRO: CHECK_INTERVAL deve ser >= 10 (valor: {CHECK_INTERVAL})")
     sys.exit(1)
 
-if not DRY_RUN and not BYBIT_API_KEY:
-    print("[CONFIG] ERRO: BYBIT_API_KEY obrigatoria no modo LIVE")
+if not DRY_RUN and (not BYBIT_API_KEY or not BYBIT_API_SECRET):
+    print("[CONFIG] ERRO: BYBIT_API_KEY e BYBIT_API_SECRET obrigatorias no modo LIVE")
     sys.exit(1)
 
 if SL_MIN_PCT >= SL_MAX_PCT:

@@ -74,8 +74,8 @@ def main():
 
     if args.live:
         cfg.DRY_RUN = False
-        if not cfg.BYBIT_API_KEY:
-            logger.error("[CONFIG] BYBIT_API_KEY obrigatoria no modo --live")
+        if not cfg.BYBIT_API_KEY or not cfg.BYBIT_API_SECRET:
+            logger.error("[CONFIG] BYBIT_API_KEY e BYBIT_API_SECRET obrigatorias no modo --live")
             sys.exit(1)
     dry_run = cfg.DRY_RUN
 
@@ -146,6 +146,9 @@ def main():
         except Exception as e:
             consecutive_errors += 1
             logger.error(f"[ERROR] ({consecutive_errors}/{max_consecutive_errors}) {e}", exc_info=True)
+            if args.once:
+                logger.error("[ONCE] Modo --once falhou, saindo com erro")
+                sys.exit(1)
             if consecutive_errors >= max_consecutive_errors:
                 logger.critical(f"[FATAL] {max_consecutive_errors} erros consecutivos, encerrando bot")
                 break
