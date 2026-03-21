@@ -29,7 +29,8 @@ def _api_call(client: HTTP, method_name: str, **kwargs):
                 raise
         except Exception as e:
             if "retryable" in str(e).lower() or "recv_window" in str(e).lower():
-                logger.warning(f"[MONITOR RETRY] Tentativa {attempt+1}/3 (pybit retryable): {e}")
+                # Nao recriar client — pybit ajusta timestamp_offset internamente
+                logger.warning(f"[MONITOR RETRY] Tentativa {attempt+1}/3 (timestamp): {e}")
                 if attempt < 2:
                     time.sleep(2 * (2 ** attempt))
                 else:
