@@ -27,6 +27,15 @@ def _api_call(client: HTTP, method_name: str, **kwargs):
                 time.sleep(2 * (2 ** attempt))
             else:
                 raise
+        except Exception as e:
+            if "retryable" in str(e).lower() or "recv_window" in str(e).lower():
+                logger.warning(f"[MONITOR RETRY] Tentativa {attempt+1}/3 (pybit retryable): {e}")
+                if attempt < 2:
+                    time.sleep(2 * (2 ** attempt))
+                else:
+                    raise
+            else:
+                raise
 
 
 def show_balance(client: HTTP):
@@ -154,7 +163,7 @@ if __name__ == "__main__":
         testnet=cfg.USE_TESTNET,
         api_key=cfg.BYBIT_API_KEY,
         api_secret=cfg.BYBIT_API_SECRET,
-        recv_window=10000,
+        recv_window=20000,
         timeout=30,
     )
     show_status(client)

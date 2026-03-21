@@ -31,7 +31,7 @@ class TradeExecutor:
             testnet=cfg.USE_TESTNET,
             api_key=cfg.BYBIT_API_KEY,
             api_secret=cfg.BYBIT_API_SECRET,
-            recv_window=10000,
+            recv_window=20000,
             timeout=30
         )
 
@@ -46,6 +46,16 @@ class TradeExecutor:
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY * (2 ** attempt))
                     self.client = self._create_client()
+                else:
+                    raise
+            except Exception as e:
+                if "retryable" in str(e).lower() or "recv_window" in str(e).lower():
+                    logger.warning(f"[RETRY] Tentativa {attempt+1}/{MAX_RETRIES} (pybit retryable): {e}")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY * (2 ** attempt))
+                        self.client = self._create_client()
+                    else:
+                        raise
                 else:
                     raise
 
