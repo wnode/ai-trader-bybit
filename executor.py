@@ -237,7 +237,11 @@ class TradeExecutor:
                 if db_ok or not self.active_trade:
                     self.active_trade = None
                 else:
-                    logger.warning("[STATE] active_trade mantido — DB nao confirmou fechamento")
+                    # Guardar dados de fechamento para retry direto no proximo ciclo
+                    self.active_trade["pending_close"] = {
+                        "exit_price": exit_price, "pnl": pnl, "close_type": close_type,
+                    }
+                    logger.warning("[STATE] active_trade mantido com pending_close — DB nao confirmou fechamento")
                 return f"Posicao fechada @ ${exit_price:,.2f} PnL=${pnl:+,.2f} — OrderID={close_order_id}"
             else:
                 # Posicao pode ter sido fechada entre get_position e place_order
@@ -297,8 +301,30 @@ class TradeExecutor:
         if pos:
             return  # ainda aberta
 
+        order_id = self.active_trade["order_id"]
+
+        # Se temos dados de fechamento pendentes (DB falhou no ciclo anterior), tentar direto
+        pending = self.active_trade.get("pending_close")
+        if pending:
+            try:
+                updated = db.record_close(
+                    order_id=order_id,
+                    exit_price=pending["exit_price"],
+                    pnl=pending["pnl"],
+                    close_type=pending["close_type"],
+                )
+                if updated:
+                    logger.info(f"[DB] Retry pending_close OK: PnL ${pending['pnl']:+,.2f}")
+                else:
+                    logger.warning(f"[DB] Retry pending_close: record_close retornou False — trade ja fechado?")
+                self.active_trade = None
+                return
+            except Exception as e:
+                logger.warning(f"[STATE] Retry pending_close falhou — active_trade mantido: {e}")
+                return
+
         try:
-            self.check_closed_by_exchange_for_order(self.active_trade["order_id"])
+            self.check_closed_by_exchange_for_order(order_id)
             self.active_trade = None
         except Exception as e:
             logger.warning(f"[STATE] Erro ao registrar fechamento no DB — active_trade mantido: {e}")
@@ -343,11 +369,14 @@ class TradeExecutor:
             if close_type is None:
                 close_type = "EXCHANGE"
 
-            db.record_close(
+            updated = db.record_close(
                 order_id=order_id,
                 exit_price=exit_price, pnl=pnl, close_type=close_type,
             )
-            logger.info(f"[DB] Posicao fechada pela Bybit ({close_type}): PnL ${pnl:+,.2f}")
+            if updated:
+                logger.info(f"[DB] Posicao fechada pela Bybit ({close_type}): PnL ${pnl:+,.2f}")
+            else:
+                logger.warning(f"[DB] record_close retornou False para order_id={order_id} — trade ja fechado?")
         except Exception as e:
             raise RuntimeError(f"Erro ao verificar fechamento: {e}") from e
 
