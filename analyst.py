@@ -84,7 +84,7 @@ class BaseAnalyst:
             # Garante que confidence e numerico
             raw_conf = decision.get("confidence", 0)
             try:
-                decision["confidence"] = float(raw_conf)
+                decision["confidence"] = max(0.0, min(1.0, float(raw_conf)))
             except (TypeError, ValueError):
                 logger.warning(f"[{self.provider_name}] Confidence nao-numerico: {raw_conf}, usando 0.0")
                 decision["confidence"] = 0.0
@@ -205,6 +205,8 @@ class AnthropicAnalyst(BaseAnalyst):
             system=_build_system_prompt(),
             messages=[{"role": "user", "content": user_msg}]
         )
+        if not response.content:
+            raise ValueError("Resposta vazia da API Anthropic")
         text = response.content[0].text.strip()
         return text, response.usage.input_tokens, response.usage.output_tokens
 
@@ -255,6 +257,8 @@ class OpenAIAnalyst(BaseAnalyst):
                 {"role": "user", "content": user_msg},
             ]
         )
+        if not response.choices:
+            raise ValueError("Resposta vazia da API OpenAI")
         text = response.choices[0].message.content.strip()
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens

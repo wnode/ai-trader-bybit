@@ -101,6 +101,8 @@ class TradeExecutor:
 
     def execute(self, decision: dict) -> str:
         """Executa a decisao da LLM. Retorna status string."""
+        if not isinstance(decision, dict) or "action" not in decision:
+            return f"Decisao invalida: {decision}"
         action = decision["action"]
 
         if action == "HOLD":
@@ -164,10 +166,6 @@ class TradeExecutor:
                 # Buscar preco real de fill
                 real_entry = self._get_fill_price(order_id, fallback=entry)
 
-                self.active_trade = {
-                    "side": side, "entry": real_entry, "sl": sl, "tp": tp,
-                    "qty": qty, "order_id": order_id,
-                }
                 try:
                     db.record_open(
                         side=action, qty=qty, entry_price=real_entry,
@@ -179,7 +177,11 @@ class TradeExecutor:
                         llm_model=self._get_llm_model(),
                     )
                 except Exception as e:
-                    logger.error(f"[DB] Falha ao registrar abertura no DB (posicao JA aberta na exchange): {e}")
+                    logger.error(f"[DB] Falha ao registrar abertura no DB (posicao JA aberta na exchange) order_id={order_id}: {e}")
+                self.active_trade = {
+                    "side": side, "entry": real_entry, "sl": sl, "tp": tp,
+                    "qty": qty, "order_id": order_id,
+                }
                 return (f"{action} {qty} BTC @ ${real_entry:,.2f} "
                         f"SL=${sl:,.2f} TP=${tp:,.2f} "
                         f"OrderID={order_id}")
@@ -219,12 +221,20 @@ class TradeExecutor:
                 exit_price = self._get_fill_price(close_order_id, fallback=pos["mark"])
                 pnl = self._calc_close_pnl(pos, exit_price)
 
+                db_ok = False
                 if self.active_trade and self.active_trade.get("order_id"):
-                    db.record_close(
-                        order_id=self.active_trade["order_id"],
-                        exit_price=exit_price, pnl=pnl, close_type=close_type,
-                    )
-                self.active_trade = None
+                    try:
+                        db.record_close(
+                            order_id=self.active_trade["order_id"],
+                            exit_price=exit_price, pnl=pnl, close_type=close_type,
+                        )
+                        db_ok = True
+                    except Exception as e:
+                        logger.error(f"[DB] Falha ao registrar fechamento order_id={self.active_trade.get('order_id')}: {e}")
+                if db_ok or not self.active_trade:
+                    self.active_trade = None
+                else:
+                    logger.warning("[STATE] active_trade mantido — DB nao confirmou fechamento")
                 return f"Posicao fechada @ ${exit_price:,.2f} PnL=${pnl:+,.2f} — OrderID={close_order_id}"
             else:
                 return f"Erro ao fechar: {result['retMsg']}"

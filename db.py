@@ -81,8 +81,8 @@ def record_open(side: str, qty: float, entry_price: float,
             side, qty, entry_price, stop_loss, take_profit,
             confidence, reason, order_id, llm_provider, llm_model,
         ))
-        conn.commit()
         trade_id = cursor.lastrowid
+        conn.commit()
     finally:
         conn.close()
     logger.info(f"[DB] Trade #{trade_id} aberto: {side} {qty} BTC @ ${entry_price:,.2f}")

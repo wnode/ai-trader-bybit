@@ -103,7 +103,7 @@ class MarketData:
             (low - close.shift()).abs()
         ], axis=1).max(axis=1)
         atr = tr.ewm(alpha=1/atr_p, min_periods=atr_p, adjust=False).mean()
-        atr = atr.replace(0, np.nan)  # Evita divisao por zero no DI
+        atr = atr.replace(0, np.finfo(float).eps)  # Evita divisao por zero no DI
 
         # ADX — corrigido: mutual exclusion antes de zerar negativos
         adx_p = cfg.ADX_PERIOD
@@ -122,7 +122,9 @@ class MarketData:
         minus_di = 100 * (smooth_minus_dm / atr)
         di_sum = plus_di + minus_di
         dx = 100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan)
+        dx = dx.fillna(0)
         adx = dx.ewm(alpha=1/adx_p, min_periods=adx_p, adjust=False).mean()
+        adx = adx.fillna(0)
 
         # Bollinger Bands (ddof=0 para population std)
         bb_period = min(cfg.BB_PERIOD, len(close))
@@ -177,10 +179,14 @@ class MarketData:
         """Formata todos os dados num texto para enviar a LLM."""
         # 15min klines (24h)
         df = self.get_klines(cfg.TIMEFRAME, cfg.KLINES_TO_SEND)
+        if df.empty:
+            raise ValueError(f"Nenhum dado de klines recebido para {cfg.SYMBOL} ({cfg.TIMEFRAME})")
         ind = self.calc_indicators(df)
 
         # Daily klines (30 dias)
         df_daily = self.get_klines("D", cfg.DAILY_KLINES)
+        if df_daily.empty:
+            raise ValueError(f"Nenhum dado de klines diarios recebido para {cfg.SYMBOL}")
 
         # Current state
         price = df["close"].iloc[-1]
@@ -207,12 +213,26 @@ class MarketData:
         rsi_val = ind['rsi'].iloc[-1]
         adx_val = ind['adx'].iloc[-1]
 
+        atr_val = ind['atr'].iloc[-1]
+        macd_val = ind['macd'].iloc[-1]
+        macd_sig_val = ind['macd_signal'].iloc[-1]
+        macd_hist_val = ind['macd_hist'].iloc[-1]
+        bb_upper_val = ind['bb_upper'].iloc[-1]
+        bb_mid_val = ind['bb_mid'].iloc[-1]
+        bb_lower_val = ind['bb_lower'].iloc[-1]
+
         lines.append("=== INDICADORES ATUAIS (15min) ===")
         lines.append(f"EMA9={ind['ema9'].iloc[-1]:,.2f} EMA21={ind['ema21'].iloc[-1]:,.2f} EMA50={ind['ema50'].iloc[-1]:,.2f}")
         lines.append(f"RSI(14)={'N/A' if pd.isna(rsi_val) else f'{rsi_val:.1f}'} | ADX={'N/A' if pd.isna(adx_val) else f'{adx_val:.1f}'}")
-        lines.append(f"MACD={ind['macd'].iloc[-1]:.2f} Signal={ind['macd_signal'].iloc[-1]:.2f} Hist={ind['macd_hist'].iloc[-1]:.2f}")
-        lines.append(f"ATR(14)=${ind['atr'].iloc[-1]:,.2f} ({ind['atr'].iloc[-1]/price*100:.3f}%)")
-        lines.append(f"BB: Upper=${ind['bb_upper'].iloc[-1]:,.2f} Mid=${ind['bb_mid'].iloc[-1]:,.2f} Lower=${ind['bb_lower'].iloc[-1]:,.2f}")
+        lines.append(f"MACD={'N/A' if pd.isna(macd_val) else f'{macd_val:.2f}'} Signal={'N/A' if pd.isna(macd_sig_val) else f'{macd_sig_val:.2f}'} Hist={'N/A' if pd.isna(macd_hist_val) else f'{macd_hist_val:.2f}'}")
+        if pd.isna(atr_val):
+            lines.append("ATR(14)=N/A")
+        else:
+            lines.append(f"ATR(14)=${atr_val:,.2f} ({atr_val/price*100:.3f}%)")
+        if pd.isna(bb_upper_val):
+            lines.append("BB: N/A")
+        else:
+            lines.append(f"BB: Upper=${bb_upper_val:,.2f} Mid=${bb_mid_val:,.2f} Lower=${bb_lower_val:,.2f}")
         lines.append("")
 
         # Recent 15min candles (last 16 = 4h)
@@ -227,7 +247,7 @@ class MarketData:
                 f"| {row['open']:>9,.2f} | {row['high']:>9,.2f} | {row['low']:>9,.2f} "
                 f"| {row['close']:>9,.2f} | {row['volume']:>7,.0f} "
                 f"| {'N/A' if pd.isna(rsi_i) else f'{rsi_i:>4.1f}'} "
-                f"| {'N/A' if pd.isna(macd_h_i) else f'{macd_h_i:>+6.1f}'}"
+                f"| {'  N/A' if pd.isna(macd_h_i) else f'{macd_h_i:>+6.1f}'}"
             )
         lines.append("")
 

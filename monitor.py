@@ -30,7 +30,11 @@ def _api_call(client: HTTP, method_name: str, **kwargs):
 
 def show_balance(client: HTTP):
     result = _api_call(client, "get_wallet_balance", accountType="UNIFIED")
-    for coin in result["result"]["list"][0]["coin"]:
+    coins = result.get("result", {}).get("list", [])
+    if not coins:
+        print("  Saldo: indisponivel (resposta API vazia)")
+        return 0.0
+    for coin in coins[0].get("coin", []):
         if coin["coin"] == "USDT":
             balance = float(coin["walletBalance"])
             print(f"  Saldo USDT: ${balance:,.2f}")
@@ -40,7 +44,11 @@ def show_balance(client: HTTP):
 
 def show_position(client: HTTP):
     result = _api_call(client, "get_positions", category="linear", symbol=cfg.SYMBOL)
-    for p in result["result"]["list"]:
+    positions = result.get("result", {}).get("list", [])
+    if not positions:
+        print("  Posicao: indisponivel (resposta API vazia)")
+        return
+    for p in positions:
         if float(p["size"]) > 0:
             entry = float(p["avgPrice"])
             mark = float(p["markPrice"])
@@ -72,10 +80,13 @@ def show_history():
 
     for i, t in enumerate(trades):
         opened = t["opened_at"]
-        # Compativel com Python < 3.11 (remove +00:00 se presente)
-        if opened.endswith("+00:00"):
-            opened = opened.replace("+00:00", "")
-        dt = datetime.fromisoformat(opened)
+        try:
+            # Compativel com Python < 3.11 (remove +00:00 se presente)
+            if opened.endswith("+00:00"):
+                opened = opened.replace("+00:00", "")
+            dt = datetime.fromisoformat(opened)
+        except (ValueError, TypeError, AttributeError):
+            dt = datetime(2000, 1, 1)  # fallback para datas malformadas
         pnl = t["pnl"] if t["pnl"] is not None else 0.0
         exit_p = t["exit_price"] if t["exit_price"] is not None else 0.0
         close_type = t.get("close_type") or "?"

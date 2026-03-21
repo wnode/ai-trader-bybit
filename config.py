@@ -10,7 +10,7 @@ load_dotenv()
 
 
 def _get_int(key: str, default: str) -> int:
-    val = os.getenv(key, default)
+    val = os.getenv(key, default).strip()
     try:
         return int(val)
     except ValueError:
@@ -19,7 +19,7 @@ def _get_int(key: str, default: str) -> int:
 
 
 def _get_float(key: str, default: str) -> float:
-    val = os.getenv(key, default)
+    val = os.getenv(key, default).strip()
     try:
         return float(val)
     except ValueError:
@@ -28,7 +28,7 @@ def _get_float(key: str, default: str) -> float:
 
 
 def _get_bool(key: str, default: str) -> bool:
-    val = os.getenv(key, default).lower()
+    val = os.getenv(key, default).strip().lower()
     if val not in ("true", "false"):
         print(f"[CONFIG] ERRO: {key} deve ser 'true' ou 'false' (valor: '{val}')")
         sys.exit(1)
@@ -118,6 +118,10 @@ if SL_MIN_PCT >= SL_MAX_PCT:
 
 if MACD_FAST >= MACD_SLOW:
     print(f"[CONFIG] ERRO: MACD_FAST ({MACD_FAST}) deve ser menor que MACD_SLOW ({MACD_SLOW})")
+    sys.exit(1)
+
+if not (EMA_FAST < EMA_MID < EMA_SLOW):
+    print(f"[CONFIG] ERRO: EMA periods devem ser EMA_FAST ({EMA_FAST}) < EMA_MID ({EMA_MID}) < EMA_SLOW ({EMA_SLOW})")
     sys.exit(1)
 
 _provider_keys = {
