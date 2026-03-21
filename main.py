@@ -8,6 +8,7 @@ Uso:
     python main.py --live       # ordens reais
     python main.py --once       # roda uma vez e sai
 """
+import os
 import sys
 import io
 import time
@@ -24,12 +25,21 @@ from config import CHECK_INTERVAL, LLM_PROVIDER, SYMBOL
 from market_data import MarketData
 from analyst import create_analyst
 from executor import TradeExecutor
+from monitor import show_status
 
-# Logging
+# Logging — console + arquivo
+os.makedirs("logs", exist_ok=True)
+log_format = '%(asctime)s | %(levelname)-8s | %(message)s'
+log_datefmt = '%Y-%m-%d %H:%M:%S'
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s | %(levelname)-8s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format=log_format,
+    datefmt=log_datefmt,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("logs/bot.log", encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -72,6 +82,12 @@ def main():
 
     print_banner(dry_run, analyst)
 
+    # Status inicial: conta, posicao e historico
+    try:
+        show_status(executor.client)
+    except Exception as e:
+        logger.warning(f"[MONITOR] Erro ao exibir status: {e}")
+
     iteration = 0
 
     logger.info(f"[START] AI Trader iniciado | {analyst.provider_name} {analyst.model} | {'DRY RUN' if dry_run else 'LIVE'}")
@@ -97,6 +113,12 @@ def main():
 
             # 4. Registra
             analyst.record_decision(decision, now.strftime("%H:%M"), result)
+
+            # Status apos execucao
+            try:
+                show_status(executor.client)
+            except Exception as e:
+                logger.warning(f"[MONITOR] Erro ao exibir status: {e}")
 
             logger.info(f"[STATS] Iteracao {iteration} completa")
 

@@ -4,6 +4,7 @@ Inclui retry com reconexao para ConnectionResetError.
 """
 import logging
 import time
+import uuid
 from pybit.unified_trading import HTTP
 
 from config import (
@@ -13,6 +14,7 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+ORDER_PREFIX = "aitbot"
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 
@@ -63,7 +65,7 @@ class TradeExecutor:
         sl_dist = abs(entry - sl) / entry
         if sl_dist == 0:
             return 0.0
-        notional = (risk_amount / sl_dist) * LEVERAGE
+        notional = risk_amount / sl_dist
         qty = notional / entry
         # Bybit min: 0.001 BTC
         qty = max(0.001, round(qty, 3))
@@ -112,6 +114,7 @@ class TradeExecutor:
                     f"(conf={decision.get('confidence', 0):.1f})")
 
         try:
+            link_id = f"{ORDER_PREFIX}-{uuid.uuid4().hex[:16]}"
             result = self._api_call(
                 self.client.place_order,
                 category="linear",
@@ -122,6 +125,7 @@ class TradeExecutor:
                 stopLoss=str(round(sl, 2)),
                 takeProfit=str(round(tp, 2)),
                 positionIdx=0,
+                orderLinkId=link_id,
             )
             if result["retCode"] == 0:
                 self.active_trade = {
@@ -149,6 +153,7 @@ class TradeExecutor:
 
         try:
             close_side = "Sell" if pos["side"] == "Buy" else "Buy"
+            link_id = f"{ORDER_PREFIX}-{uuid.uuid4().hex[:16]}"
             result = self._api_call(
                 self.client.place_order,
                 category="linear",
@@ -158,6 +163,7 @@ class TradeExecutor:
                 qty=str(pos["size"]),
                 reduceOnly=True,
                 positionIdx=0,
+                orderLinkId=link_id,
             )
             if result["retCode"] == 0:
                 self.active_trade = None
