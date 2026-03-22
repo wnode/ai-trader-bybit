@@ -74,8 +74,6 @@ SL_MAX_PCT = _get_float("SL_MAX_PCT", "1.0")
 MIN_RR_RATIO = _get_float("MIN_RR_RATIO", "1.0")
 MIN_CONFIDENCE = _get_float("MIN_CONFIDENCE", "0.7")
 ADX_RANGING_THRESHOLD = _get_float("ADX_RANGING_THRESHOLD", "15")
-TP_ORDER_TYPE = os.getenv("TP_ORDER_TYPE", "Market").strip()
-SL_ORDER_TYPE = os.getenv("SL_ORDER_TYPE", "Market").strip()
 
 # LLM Provider
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").strip().lower()
@@ -124,14 +122,6 @@ if MACD_FAST >= MACD_SLOW:
 
 if not (EMA_FAST < EMA_MID < EMA_SLOW):
     print(f"[CONFIG] ERRO: EMA periods devem ser EMA_FAST ({EMA_FAST}) < EMA_MID ({EMA_MID}) < EMA_SLOW ({EMA_SLOW})")
-    sys.exit(1)
-
-_valid_order_types = ("Market", "Limit")
-if TP_ORDER_TYPE not in _valid_order_types:
-    print(f"[CONFIG] ERRO: TP_ORDER_TYPE deve ser Market ou Limit (valor: '{TP_ORDER_TYPE}')")
-    sys.exit(1)
-if SL_ORDER_TYPE not in _valid_order_types:
-    print(f"[CONFIG] ERRO: SL_ORDER_TYPE deve ser Market ou Limit (valor: '{SL_ORDER_TYPE}')")
     sys.exit(1)
 
 _provider_keys = {
