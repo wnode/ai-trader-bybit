@@ -23,7 +23,7 @@ REGRAS PARA ABRIR POSICAO:
 3. Se LONG ou SHORT, defina entry, stop_loss e take_profit
 4. SL deve ser entre {cfg.SL_MIN_PCT}% e {cfg.SL_MAX_PCT}% do preco de entrada
 5. TP deve ser pelo menos {cfg.MIN_RR_RATIO}x a distancia do SL (risk/reward >= {cfg.MIN_RR_RATIO}:1)
-6. Seja conservador — so entre quando ha alta confianca no setup
+6. Seja moderado — entre quando o setup e claro e os indicadores convergem
 7. Considere: tendencia (EMAs), momentum (RSI, MACD), volatilidade (ATR, BB), volume
 8. Evite operar em mercado lateral/ranging (ADX < {cfg.ADX_RANGING_THRESHOLD:.0f})
 9. Considere o contexto diario para nao operar contra a macro tendencia
