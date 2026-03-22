@@ -156,7 +156,6 @@ class TradeExecutor:
                 "orderType": "Market",
                 "qty": str(qty),
                 "stopLoss": str(round(sl, 2)),
-                "takeProfit": str(round(tp, 2)),
                 "positionIdx": 0,
                 "orderLinkId": link_id,
             }
@@ -166,6 +165,9 @@ class TradeExecutor:
 
                 # Buscar preco real de fill
                 real_entry = self._get_fill_price(order_id, fallback=entry)
+
+                # Definir TP como Limit order (maker fee 0.020% vs taker 0.055%)
+                self._set_tp_limit(tp)
 
                 try:
                     db.record_open(
@@ -184,7 +186,7 @@ class TradeExecutor:
                     "qty": qty, "order_id": order_id,
                 }
                 return (f"{action} {qty} BTC @ ${real_entry:,.2f} "
-                        f"SL=${sl:,.2f} TP=${tp:,.2f} "
+                        f"SL=${sl:,.2f} TP=${tp:,.2f}(Limit) "
                         f"OrderID={order_id}")
             else:
                 return f"Erro Bybit: {result['retMsg']}"
@@ -252,6 +254,45 @@ class TradeExecutor:
                 return f"Erro ao fechar: {result['retMsg']}"
         except Exception as e:
             return f"Erro ao fechar: {e}"
+
+    def _set_tp_limit(self, tp: float):
+        """Define Take Profit como Limit order (maker fee 0.020% vs taker 0.055%).
+        Se falhar, tenta definir como Market para nao ficar sem TP."""
+        tp_str = str(round(tp, 2))
+        try:
+            result = self._api_call(
+                "set_trading_stop",
+                category="linear",
+                symbol=cfg.SYMBOL,
+                takeProfit=tp_str,
+                tpTriggerBy="LastPrice",
+                tpslMode="Full",
+                tpOrderType="Limit",
+                tpLimitPrice=tp_str,
+                positionIdx=0,
+            )
+            if result["retCode"] == 0:
+                logger.info(f"[TP] Take Profit Limit @ ${tp:,.2f} (maker fee)")
+                return
+            logger.warning(f"[TP] Falha TP Limit: {result['retMsg']} — tentando Market")
+        except Exception as e:
+            logger.warning(f"[TP] Erro TP Limit: {e} — tentando Market")
+        # Fallback: TP Market para nao ficar sem protecao
+        try:
+            result = self._api_call(
+                "set_trading_stop",
+                category="linear",
+                symbol=cfg.SYMBOL,
+                takeProfit=tp_str,
+                tpTriggerBy="LastPrice",
+                positionIdx=0,
+            )
+            if result["retCode"] == 0:
+                logger.info(f"[TP] Take Profit Market @ ${tp:,.2f} (fallback)")
+            else:
+                logger.error(f"[TP] Falha TP Market fallback: {result['retMsg']} — posicao SEM Take Profit!")
+        except Exception as e:
+            logger.error(f"[TP] Erro TP Market fallback: {e} — posicao SEM Take Profit!")
 
     def _get_fill_price(self, order_id: str, fallback: float) -> float:
         """Busca preco real de fill de uma ordem."""
