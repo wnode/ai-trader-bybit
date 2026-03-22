@@ -157,6 +157,7 @@ class TradeExecutor:
                 "qty": str(qty),
                 "stopLoss": str(round(sl, 2)),
                 "takeProfit": str(round(tp, 2)),
+                "tpSlMode": "Full",
                 "tpOrderType": cfg.TP_ORDER_TYPE,
                 "slOrderType": cfg.SL_ORDER_TYPE,
                 "positionIdx": 0,
