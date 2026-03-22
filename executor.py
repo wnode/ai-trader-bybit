@@ -155,7 +155,6 @@ class TradeExecutor:
                 "side": side,
                 "orderType": "Market",
                 "qty": str(qty),
-                "stopLoss": str(round(sl, 2)),
                 "positionIdx": 0,
                 "orderLinkId": link_id,
             }
@@ -166,8 +165,8 @@ class TradeExecutor:
                 # Buscar preco real de fill
                 real_entry = self._get_fill_price(order_id, fallback=entry)
 
-                # Definir TP como Limit order (maker fee 0.020% vs taker 0.055%)
-                self._set_tp_limit(tp)
+                # Definir SL (Market) e TP (Limit) via set_trading_stop no modo Partial
+                self._set_sl_tp(sl, tp)
 
                 try:
                     db.record_open(
@@ -255,44 +254,52 @@ class TradeExecutor:
         except Exception as e:
             return f"Erro ao fechar: {e}"
 
-    def _set_tp_limit(self, tp: float):
-        """Define Take Profit como Limit order (maker fee 0.020% vs taker 0.055%).
-        Se falhar, tenta definir como Market para nao ficar sem TP."""
+    def _set_sl_tp(self, sl: float, tp: float):
+        """Define SL (Market) e TP (Limit, maker fee 0.020%) via set_trading_stop.
+        Usa tpslMode=Partial para permitir tpOrderType=Limit.
+        Se Limit falhar, tenta TP Market como fallback."""
+        sl_str = str(round(sl, 2))
         tp_str = str(round(tp, 2))
         try:
             result = self._api_call(
                 "set_trading_stop",
                 category="linear",
                 symbol=cfg.SYMBOL,
+                stopLoss=sl_str,
+                slTriggerBy="LastPrice",
                 takeProfit=tp_str,
                 tpTriggerBy="LastPrice",
-                tpslMode="Full",
+                tpslMode="Partial",
                 tpOrderType="Limit",
                 tpLimitPrice=tp_str,
+                tpSize="0",
+                slSize="0",
                 positionIdx=0,
             )
             if result["retCode"] == 0:
-                logger.info(f"[TP] Take Profit Limit @ ${tp:,.2f} (maker fee)")
+                logger.info(f"[SL/TP] SL Market @ ${sl:,.2f} | TP Limit @ ${tp:,.2f} (maker fee)")
                 return
-            logger.warning(f"[TP] Falha TP Limit: {result['retMsg']} — tentando Market")
+            logger.warning(f"[SL/TP] Falha Partial: {result['retMsg']} — tentando Full mode")
         except Exception as e:
-            logger.warning(f"[TP] Erro TP Limit: {e} — tentando Market")
-        # Fallback: TP Market para nao ficar sem protecao
+            logger.warning(f"[SL/TP] Erro Partial: {e} — tentando Full mode")
+        # Fallback: Full mode (SL + TP ambos Market)
         try:
             result = self._api_call(
                 "set_trading_stop",
                 category="linear",
                 symbol=cfg.SYMBOL,
+                stopLoss=sl_str,
+                slTriggerBy="LastPrice",
                 takeProfit=tp_str,
                 tpTriggerBy="LastPrice",
                 positionIdx=0,
             )
             if result["retCode"] == 0:
-                logger.info(f"[TP] Take Profit Market @ ${tp:,.2f} (fallback)")
+                logger.info(f"[SL/TP] SL Market @ ${sl:,.2f} | TP Market @ ${tp:,.2f} (fallback)")
             else:
-                logger.error(f"[TP] Falha TP Market fallback: {result['retMsg']} — posicao SEM Take Profit!")
+                logger.error(f"[SL/TP] Falha fallback: {result['retMsg']} — posicao SEM SL/TP!")
         except Exception as e:
-            logger.error(f"[TP] Erro TP Market fallback: {e} — posicao SEM Take Profit!")
+            logger.error(f"[SL/TP] Erro fallback: {e} — posicao SEM SL/TP!")
 
     def _get_fill_price(self, order_id: str, fallback: float) -> float:
         """Busca preco real de fill de uma ordem."""
