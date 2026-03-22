@@ -397,19 +397,18 @@ class TradeExecutor:
                     close_type = "TP" if o["stopOrderType"] == "TakeProfit" else "SL"
                     break
 
-            # Buscar PnL real no closed_pnl — filtrar pelo orderId de abertura
+            # Buscar PnL real no closed_pnl — pegar o mais recente
+            # Nota: orderId no closed_pnl e da ordem de FECHAMENTO, nao de abertura
             closed = self._api_call(
                 "get_closed_pnl",
-                category="linear", symbol=cfg.SYMBOL, limit=10,
+                category="linear", symbol=cfg.SYMBOL, limit=5,
             )
             matched = None
-            for t in closed["result"]["list"]:
-                if t.get("orderId") == order_id:
-                    matched = t
-                    break
+            if closed["result"]["list"]:
+                matched = closed["result"]["list"][0]  # mais recente
 
             if not matched:
-                raise RuntimeError(f"closed_pnl nao encontrado para order_id={order_id}")
+                raise RuntimeError(f"closed_pnl vazio para {cfg.SYMBOL}")
 
             exit_price = float(matched["avgExitPrice"])
             pnl = float(matched["closedPnl"])
