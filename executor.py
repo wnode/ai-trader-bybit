@@ -387,13 +387,12 @@ class TradeExecutor:
             )
 
             # Encontrar a ordem de TP ou SL que foi Filled
-            # Filtra por ordens do bot (prefixo aitbot) para evitar casar com ordens de terceiros
+            # TP/SL criados via set_trading_stop nao tem prefixo aitbot,
+            # mas como operamos uma posicao por vez, a mais recente e nossa
             close_type = None
             for o in orders["result"]["list"]:
-                link = o.get("orderLinkId", "")
                 if (o["orderStatus"] == "Filled"
-                        and o["stopOrderType"] in ("TakeProfit", "StopLoss")
-                        and link.startswith(ORDER_PREFIX)):
+                        and o["stopOrderType"] in ("TakeProfit", "StopLoss")):
                     close_type = "TP" if o["stopOrderType"] == "TakeProfit" else "SL"
                     break
 
