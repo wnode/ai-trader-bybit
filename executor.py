@@ -433,6 +433,7 @@ class TradeExecutor:
                 "google": cfg.GOOGLE_MODEL,
                 "anthropic": cfg.ANTHROPIC_MODEL,
                 "openai": cfg.OPENAI_MODEL,
+                "xai": cfg.XAI_MODEL,
             }
             return models.get(cfg.LLM_PROVIDER.lower(), "")
         except Exception:

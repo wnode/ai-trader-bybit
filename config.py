@@ -90,8 +90,12 @@ GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+# xAI (Grok)
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+XAI_MODEL = os.getenv("XAI_MODEL", "grok-3-mini")
+
 # Validacoes
-VALID_PROVIDERS = ("google", "anthropic", "openai")
+VALID_PROVIDERS = ("google", "anthropic", "openai", "xai")
 if LLM_PROVIDER not in VALID_PROVIDERS:
     print(f"[CONFIG] ERRO: LLM_PROVIDER deve ser um de {VALID_PROVIDERS} (valor: '{LLM_PROVIDER}')")
     sys.exit(1)
@@ -128,6 +132,7 @@ _provider_keys = {
     "google": GOOGLE_API_KEY,
     "anthropic": ANTHROPIC_API_KEY,
     "openai": OPENAI_API_KEY,
+    "xai": XAI_API_KEY,
 }
 if not _provider_keys.get(LLM_PROVIDER):
     print(f"[CONFIG] ERRO: API key para {LLM_PROVIDER} nao configurada")

@@ -1,6 +1,8 @@
 """
 LLM Analyst — envia dados de mercado a uma LLM e recebe decisao de trade.
 Suporta: Anthropic (Claude), Google (Gemini), OpenAI (GPT)
+
+v2 — prompt com framework de confluencia, filtros de bloqueio e regras interpretativas.
 """
 import json
 import re
@@ -17,41 +19,104 @@ def _build_system_prompt() -> str:
     return f"""Voce e um trader profissional de Bitcoin Futures ({cfg.SYMBOL} perpetual) na Bybit.
 Voce opera com alavancagem {cfg.LEVERAGE}x em timeframe de {cfg.TIMEFRAME} minutos.
 
-REGRAS PARA ABRIR POSICAO:
-1. Analise os dados de mercado fornecidos (candles, indicadores, contexto diario)
-2. Decida: LONG, SHORT ou HOLD (nao operar agora)
-3. Se LONG ou SHORT, defina entry, stop_loss e take_profit
-4. SL deve ser entre {cfg.SL_MIN_PCT}% e {cfg.SL_MAX_PCT}% do preco de entrada
-5. TP deve ser pelo menos {cfg.MIN_RR_RATIO}x a distancia do SL (risk/reward >= {cfg.MIN_RR_RATIO}:1)
-6. Seja moderado — entre quando o setup e claro e os indicadores convergem
-7. Considere: tendencia (EMAs), momentum (RSI, MACD), volatilidade (ATR, BB), volume
-8. Evite operar em mercado lateral/ranging (ADX < {cfg.ADX_RANGING_THRESHOLD:.0f})
-9. Considere o contexto diario para nao operar contra a macro tendencia
+=== FRAMEWORK DE DECISAO ===
 
-REGRAS PARA POSICAO ABERTA (MUITO IMPORTANTE):
-10. SL e TP ja estao configurados na exchange — eles serao executados automaticamente
-11. NAO feche a posicao so porque houve um pullback pequeno — isso e normal
-12. HOLD e o padrao quando ha posicao aberta. Deixe o trade respirar e atingir SL ou TP
-13. So use CLOSE em situacoes excepcionais:
-    - Reversao CONFIRMADA: multiplos indicadores mudaram de direcao (EMA cruzou contra, MACD cruzou contra, RSI saiu de zona extrema)
-    - Evento de mercado: volume anormal (>3x media) contra sua posicao
-    - Invalidacao do setup original: a tese que motivou a entrada nao e mais valida
-14. Um pullback de 0.1-0.3% NAO e motivo para fechar — o SL existe para isso
-15. Se o preco esta entre entry e SL, mantenha HOLD a menos que haja reversao clara
+Para ABRIR posicao, exija CONFLUENCIA DE NO MINIMO 3 dos 5 sinais abaixo:
 
-RESPONDA SEMPRE em JSON valido com esta estrutura:
+1. TENDENCIA (EMAs):
+   - LONG: EMA{cfg.EMA_FAST} > EMA{cfg.EMA_MID} > EMA{cfg.EMA_SLOW} (alinhamento bullish)
+   - SHORT: EMA{cfg.EMA_FAST} < EMA{cfg.EMA_MID} < EMA{cfg.EMA_SLOW} (alinhamento bearish)
+   - NEUTRO: EMAs entrelagadas = sem tendencia clara
+
+2. MOMENTUM (RSI):
+   - LONG: RSI entre 40-65 (momentum saudavel, nao sobrecomprado)
+   - SHORT: RSI entre 35-60 (momentum saudavel, nao sobrevendido)
+   - RSI > 75 = sobrecomprado (BLOQUEIA long)
+   - RSI < 25 = sobrevendido (BLOQUEIA short)
+
+3. MOMENTUM (MACD):
+   - LONG: Histograma MACD positivo E crescente (valor atual > anterior)
+   - SHORT: Histograma MACD negativo E decrescente (valor atual < anterior)
+   - Cruzamento recente da signal line reforga o sinal
+
+4. VOLUME:
+   - Volume do candle atual > 1.2x a media de volume ({cfg.VOL_AVG_PERIOD} periodos)
+   - Volume fraco (<0.8x media) = sinal fraco, reduz confianca
+
+5. BOLLINGER BANDS:
+   - LONG: Preco acima da banda media E abaixo da superior (espago para subir)
+   - SHORT: Preco abaixo da banda media E acima da inferior (espago para cair)
+   - Preco colado na banda = nao entrar nessa direcao
+
+=== FILTROS DE BLOQUEIO (qualquer um impede abertura) ===
+
+- ADX < {cfg.ADX_RANGING_THRESHOLD:.0f}: mercado lateral/ranging, NAO operar
+- ATR < 0.15% do preco: volatilidade insuficiente, spread vai comer o lucro
+- Candle doji: |open - close| < 0.05% do preco = indecisao, NAO operar
+- RSI extremo: RSI > 75 bloqueia LONG, RSI < 25 bloqueia SHORT
+- Divergencia macro: se candles diarios mostram tendencia CONTRARIA aos indicadores de 15min, NAO operar contra o diario
+
+=== REGRAS DE ENTRADA (LONG/SHORT) ===
+
+1. Exija no minimo 3 confluencias dos 5 sinais acima
+2. Entry = preco atual de mercado (sera executado como Market order)
+3. Stop Loss: entre {cfg.SL_MIN_PCT}% e {cfg.SL_MAX_PCT}% do preco de entrada
+   - Posicione o SL em nivel tecnico (abaixo de suporte para LONG, acima de resistencia para SHORT)
+   - Use ATR como referencia: SL = 1.2 x ATR e um bom ponto de partida
+   - Se 1.2 x ATR cair fora da faixa {cfg.SL_MIN_PCT}%-{cfg.SL_MAX_PCT}%, ajuste para ficar dentro
+4. Take Profit: risco/retorno minimo de {cfg.MIN_RR_RATIO}:1 (distancia TP >= {cfg.MIN_RR_RATIO}x distancia SL)
+   - Posicione o TP em nivel tecnico (resistencia para LONG, suporte para SHORT)
+   - Bollinger Band oposta e uma boa referencia
+
+=== REGRAS PARA POSICAO ABERTA (MUITO IMPORTANTE) ===
+
+Quando ja existe posicao aberta:
+- SL e TP ja estao configurados na Bybit e serao executados automaticamente
+- HOLD e o PADRAO. Deixe o trade respirar e atingir SL ou TP
+- NAO feche por pullback pequeno (0.1-0.5%) — isso e normal, o SL existe para isso
+- Se o preco esta entre entry e SL, mantenha HOLD a menos que haja reversao CLARA
+
+CLOSE so em situacoes EXCEPCIONAIS:
+- Reversao CONFIRMADA: pelo menos 3 indicadores mudaram de direcao (EMA cruzou contra + MACD cruzou contra + RSI saiu de zona extrema)
+- Volume anormal: >3x a media CONTRA sua posicao
+- Invalidacao total: a tese que motivou a entrada nao e mais valida por multiplos fatores
+
+=== FORMATO DE RESPOSTA (JSON) ===
+
+Responda SEMPRE em JSON valido com esta estrutura:
 {{
     "action": "LONG" | "SHORT" | "HOLD" | "CLOSE",
     "confidence": 0.0 a 1.0,
     "entry": preco_de_entrada (null se HOLD/CLOSE),
     "stop_loss": preco_do_sl (null se HOLD/CLOSE),
     "take_profit": preco_do_tp (null se HOLD/CLOSE),
+    "confluence_count": numero de sinais alinhados (0-5),
+    "signals_met": ["trend", "rsi", "macd", "volume", "bollinger"],
+    "filters_blocked": ["adx_low", "atr_low", "rsi_extreme", "doji", "macro_divergence"],
     "reason": "explicacao curta do setup (max 2 frases)"
 }}
 
-Se HOLD, explique por que nao ha setup (ou por que manter a posicao).
-Se CLOSE, explique QUAIS indicadores confirmam a reversao.
-Confianca minima para operar: {cfg.MIN_CONFIDENCE} (abaixo disso, retorne HOLD)."""
+Regras do JSON:
+- confluence_count: quantos dos 5 sinais estao alinhados na direcao do trade
+- signals_met: lista dos sinais que confirmam (apenas os que passaram)
+- filters_blocked: lista de filtros que impediram (vazio [] se nenhum bloqueou)
+- Se HOLD sem posicao: explique quais sinais faltam e quais filtros bloquearam
+- Se HOLD com posicao: explique por que manter
+- Se CLOSE: liste QUAIS indicadores confirmam a reversao
+- Confianca minima para operar: {cfg.MIN_CONFIDENCE} (abaixo disso, retorne HOLD)
+
+=== CALIBRACAO DE CONFIANCA ===
+
+- 0.9-1.0: 5 confluencias + volume forte + tendencia diaria alinhada
+- 0.8-0.9: 4 confluencias + sem filtro bloqueando
+- 0.7-0.8: 3 confluencias claras
+- 0.5-0.7: 2 confluencias ou sinais ambiguos = HOLD
+- <0.5: setup fraco ou conflitante = HOLD obrigatorio
+
+=== REGRA DE OURO ===
+
+Em caso de duvida, retorne HOLD. Capital preservado e capital que opera amanha.
+Nunca force um trade. Espere o setup vir ate voce."""
 
 
 def create_analyst() -> "BaseAnalyst":
@@ -63,8 +128,10 @@ def create_analyst() -> "BaseAnalyst":
         return GoogleAnalyst()
     elif provider == "openai":
         return OpenAIAnalyst()
+    elif provider == "xai":
+        return XAIAnalyst()
     else:
-        raise ValueError(f"Provider desconhecido: {cfg.LLM_PROVIDER}. Use: anthropic, google, openai")
+        raise ValueError(f"Provider desconhecido: {cfg.LLM_PROVIDER}. Use: anthropic, google, openai, xai")
 
 
 class BaseAnalyst:
@@ -108,6 +175,12 @@ class BaseAnalyst:
                 logger.info(f"[{self.provider_name}] Confianca baixa ({decision['confidence']:.1f}), convertendo para HOLD")
                 decision["action"] = "HOLD"
 
+            # Validacao de confluencia minima
+            confluence = decision.get("confluence_count", 0)
+            if decision["action"] in ("LONG", "SHORT") and confluence < 3:
+                logger.info(f"[{self.provider_name}] Confluencia insuficiente ({confluence}/5), convertendo para HOLD")
+                decision["action"] = "HOLD"
+
             # Validacao de entry/SL/TP para LONG/SHORT
             if decision["action"] in ("LONG", "SHORT"):
                 entry = decision.get("entry")
@@ -129,7 +202,15 @@ class BaseAnalyst:
                     logger.warning(f"[{self.provider_name}] SL/TP invalidos para SHORT: SL={sl} Entry={entry} TP={tp}")
                     decision["action"] = "HOLD"
 
-            logger.info(f"[{self.provider_name}] {self.model} | {decision['action']} | conf={decision['confidence']:.1f} | {decision.get('reason', '')}")
+            # Log detalhado
+            signals = decision.get("signals_met", [])
+            filters = decision.get("filters_blocked", [])
+            logger.info(
+                f"[{self.provider_name}] {self.model} | {decision['action']} | "
+                f"conf={decision['confidence']:.1f} | confluence={confluence}/5 | "
+                f"signals={signals} | filters={filters} | "
+                f"{decision.get('reason', '')}"
+            )
             logger.info(f"[{self.provider_name}] Tokens: {input_tokens}in/{output_tokens}out")
 
             return decision
@@ -153,6 +234,7 @@ class BaseAnalyst:
             entry = re.search(r'"entry"\s*:\s*([\d.]+|null)', text)
             sl = re.search(r'"stop_loss"\s*:\s*([\d.]+|null)', text)
             tp = re.search(r'"take_profit"\s*:\s*([\d.]+|null)', text)
+            confluence = re.search(r'"confluence_count"\s*:\s*(\d+)', text)
             reason = re.search(r'"reason"\s*:\s*"([^"]*)', text)
 
             if action:
@@ -162,6 +244,9 @@ class BaseAnalyst:
                     "entry": float(entry.group(1)) if entry and entry.group(1) != "null" else None,
                     "stop_loss": float(sl.group(1)) if sl and sl.group(1) != "null" else None,
                     "take_profit": float(tp.group(1)) if tp and tp.group(1) != "null" else None,
+                    "confluence_count": int(confluence.group(1)) if confluence else 0,
+                    "signals_met": [],
+                    "filters_blocked": [],
                     "reason": reason.group(1) if reason else "JSON truncado",
                 }
                 logger.warning(f"[{self.provider_name}] JSON truncado recuperado: {result['action']}")
@@ -183,7 +268,8 @@ class BaseAnalyst:
                 conf_str = f"{float(conf):.1f}"
             except (TypeError, ValueError):
                 conf_str = str(conf)
-            lines.append(f"  {h['time']} | {h['action']} | conf={conf_str} | {h['reason']}")
+            confluence = h.get('confluence_count', '?')
+            lines.append(f"  {h['time']} | {h['action']} | conf={conf_str} | confluence={confluence}/5 | {h['reason']}")
             if h.get('result'):
                 lines.append(f"    -> Resultado: {h['result']}")
         return "\n".join(lines)
@@ -193,6 +279,7 @@ class BaseAnalyst:
             "time": timestamp,
             "action": decision["action"],
             "confidence": decision.get("confidence", 0),
+            "confluence_count": decision.get("confluence_count", 0),
             "reason": decision.get("reason", ""),
             "result": result,
         })
@@ -212,6 +299,7 @@ class AnthropicAnalyst(BaseAnalyst):
         response = self.client.messages.create(
             model=self.model,
             max_tokens=1024,
+            temperature=0.1,  # Baixa temperatura para consistencia
             system=_build_system_prompt(),
             messages=[{"role": "user", "content": user_msg}]
         )
@@ -238,7 +326,7 @@ class GoogleAnalyst(BaseAnalyst):
             config=types.GenerateContentConfig(
                 system_instruction=_build_system_prompt(),
                 max_output_tokens=2048,
-                temperature=0.3,
+                temperature=0.1,  # Baixa temperatura para consistencia
                 response_mime_type="application/json",
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
@@ -263,7 +351,7 @@ class OpenAIAnalyst(BaseAnalyst):
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=1024,
-            temperature=0.3,
+            temperature=0.1,  # Baixa temperatura para consistencia
             messages=[
                 {"role": "system", "content": _build_system_prompt()},
                 {"role": "user", "content": user_msg},
@@ -271,6 +359,35 @@ class OpenAIAnalyst(BaseAnalyst):
         )
         if not response.choices:
             raise ValueError("Resposta vazia da API OpenAI")
+        text = response.choices[0].message.content.strip()
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        return text, input_tokens, output_tokens
+
+
+class XAIAnalyst(BaseAnalyst):
+    """xAI Grok."""
+
+    def __init__(self):
+        super().__init__("GROK", cfg.XAI_MODEL)
+        from openai import OpenAI
+        self.client = OpenAI(
+            api_key=cfg.XAI_API_KEY,
+            base_url="https://api.x.ai/v1",
+        )
+
+    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=1024,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": _build_system_prompt()},
+                {"role": "user", "content": user_msg},
+            ]
+        )
+        if not response.choices:
+            raise ValueError("Resposta vazia da API xAI")
         text = response.choices[0].message.content.strip()
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
