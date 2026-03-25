@@ -1,6 +1,6 @@
 """
 Configuracao do AI Trader Bot.
-Suporta multiplos providers: anthropic, google, openai
+Suporta multiplos providers: anthropic, google, openai, xai
 """
 import os
 import sys
@@ -74,6 +74,11 @@ SL_MAX_PCT = _get_float("SL_MAX_PCT", "1.0")
 MIN_RR_RATIO = _get_float("MIN_RR_RATIO", "1.0")
 MIN_CONFIDENCE = _get_float("MIN_CONFIDENCE", "0.7")
 ADX_RANGING_THRESHOLD = _get_float("ADX_RANGING_THRESHOLD", "15")
+
+# Sentimento de mercado
+USE_SENTIMENT = _get_bool("USE_SENTIMENT", "false")
+FNG_CACHE_MINUTES = _get_int("FNG_CACHE_MINUTES", "60")
+XAI_SEARCH = _get_bool("XAI_SEARCH", "false")
 
 # LLM Provider
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").strip().lower()

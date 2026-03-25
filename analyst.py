@@ -105,6 +105,19 @@ Regras do JSON:
 - Se CLOSE: liste QUAIS indicadores confirmam a reversao
 - Confianca minima para operar: {cfg.MIN_CONFIDENCE} (abaixo disso, retorne HOLD)
 
+=== CONTEXTO DE SENTIMENTO (se disponivel) ===
+
+Se dados de sentimento forem fornecidos (Fear & Greed Index, noticias, posts do X):
+- Use como CONTEXTO adicional, NAO como sinal primario
+- Fear & Greed 0-24 (Extreme Fear): mercado em panico, possivel oportunidade contrarian para LONG
+- Fear & Greed 25-49 (Fear): sentimento negativo, cautela
+- Fear & Greed 50 (Neutro): indecisao
+- Fear & Greed 51-74 (Greed): sentimento positivo, mercado otimista
+- Fear & Greed 75-100 (Extreme Greed): euforia, possivel oportunidade contrarian para SHORT
+- Sentimento extremo CONTRA sua direcao = reduz confianca em 0.1
+- Sentimento extremo A FAVOR (contrarian) = pode reforcar a tese
+- NAO abra trades baseado APENAS em sentimento — exija confluencia tecnica
+
 === CALIBRACAO DE CONFIANCA ===
 
 - 0.9-1.0: 5 confluencias + volume forte + tendencia diaria alinhada
@@ -366,17 +379,36 @@ class OpenAIAnalyst(BaseAnalyst):
 
 
 class XAIAnalyst(BaseAnalyst):
-    """xAI Grok."""
+    """xAI Grok — suporta x_search e web_search para sentimento em tempo real."""
 
     def __init__(self):
         super().__init__("GROK", cfg.XAI_MODEL)
+        self.use_search = cfg.XAI_SEARCH
+        if self.use_search:
+            self._init_responses_client()
+        else:
+            self._init_chat_client()
+
+    def _init_chat_client(self):
+        """Client OpenAI-compatible para chat completions (sem search)."""
         from openai import OpenAI
         self.client = OpenAI(
             api_key=cfg.XAI_API_KEY,
             base_url="https://api.x.ai/v1",
         )
 
+    def _init_responses_client(self):
+        """Prepara headers para Responses API (com search tools)."""
+        self._api_key = cfg.XAI_API_KEY
+        self._base_url = "https://api.x.ai/v1"
+
     def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+        if self.use_search:
+            return self._call_with_search(user_msg)
+        return self._call_chat(user_msg)
+
+    def _call_chat(self, user_msg: str) -> tuple[str, int, int]:
+        """Chat completions padrao (sem search)."""
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=1024,
@@ -391,4 +423,60 @@ class XAIAnalyst(BaseAnalyst):
         text = response.choices[0].message.content.strip()
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
+        return text, input_tokens, output_tokens
+
+    def _call_with_search(self, user_msg: str) -> tuple[str, int, int]:
+        """Responses API com x_search + web_search para sentimento em tempo real."""
+        import requests as req
+
+        search_prompt = (
+            "Antes de analisar os indicadores tecnicos, busque informacoes recentes sobre Bitcoin: "
+            "1) Sentimento atual no X (Twitter) sobre BTC — bullish ou bearish? "
+            "2) Noticias recentes que podem impactar o preco do Bitcoin. "
+            "3) Nivel de medo/ganancia do mercado crypto. "
+            "Use essas informacoes como CONTEXTO adicional junto com os indicadores tecnicos abaixo.\n\n"
+        )
+
+        payload = {
+            "model": self.model,
+            "instructions": _build_system_prompt(),
+            "input": search_prompt + user_msg,
+            "tools": [
+                {"type": "x_search"},
+                {"type": "web_search"},
+            ],
+            "temperature": 0.1,
+            "max_output_tokens": 2048,
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+
+        resp = req.post(
+            f"{self._base_url}/responses",
+            json=payload,
+            headers=headers,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Extrair texto da resposta (pode ter multiplos output items)
+        text = ""
+        for item in data.get("output", []):
+            if item.get("type") == "message":
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        text += content.get("text", "")
+
+        if not text:
+            raise ValueError("Resposta vazia da API xAI Responses")
+
+        text = text.strip()
+        usage = data.get("usage", {})
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+
         return text, input_tokens, output_tokens

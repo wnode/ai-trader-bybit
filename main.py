@@ -28,6 +28,7 @@ from market_data import MarketData
 from analyst import create_analyst
 from executor import TradeExecutor
 from monitor import show_status
+from sentiment import SentimentData
 import db
 
 # Logging — console + arquivo
@@ -105,6 +106,7 @@ def main():
     # Init components
     db.init_db()
     market = MarketData()
+    sentiment = SentimentData()
     analyst = create_analyst()
     executor = TradeExecutor()
 
@@ -139,6 +141,11 @@ def main():
             # 1. Coleta dados
             logger.info("[DATA] Coletando dados de mercado...")
             market_text = market.format_for_llm()
+
+            # 1b. Sentimento de mercado (Fear & Greed Index)
+            sentiment_text = sentiment.format_for_llm()
+            if sentiment_text:
+                market_text += "\n\n" + sentiment_text
 
             # 2. Envia a LLM
             logger.info(f"[LLM] Analisando com {analyst.provider_name} {analyst.model}...")
