@@ -99,6 +99,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 XAI_MODEL = os.getenv("XAI_MODEL", "grok-3-mini")
 XAI_SEARCH_MODEL = os.getenv("XAI_SEARCH_MODEL", "grok-4-1-fast-non-reasoning")
+XAI_SEARCH_CACHE_ITERATIONS = _get_int("XAI_SEARCH_CACHE_ITERATIONS", "6")
 
 # Validacoes
 VALID_PROVIDERS = ("google", "anthropic", "openai", "xai")

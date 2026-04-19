@@ -379,37 +379,29 @@ class OpenAIAnalyst(BaseAnalyst):
 
 
 class XAIAnalyst(BaseAnalyst):
-    """xAI Grok — suporta x_search e web_search para sentimento em tempo real."""
+    """xAI Grok — suporta x_search e web_search para sentimento em tempo real.
+    Search e cacheado por N iteracoes para economizar creditos."""
 
     def __init__(self):
         self.use_search = cfg.XAI_SEARCH
-        model = cfg.XAI_SEARCH_MODEL if self.use_search else cfg.XAI_MODEL
-        super().__init__("GROK", model)
-        if self.use_search:
-            self._init_responses_client()
-        else:
-            self._init_chat_client()
-
-    def _init_chat_client(self):
-        """Client OpenAI-compatible para chat completions (sem search)."""
+        super().__init__("GROK", cfg.XAI_MODEL)
         from openai import OpenAI
         self.client = OpenAI(
             api_key=cfg.XAI_API_KEY,
             base_url="https://api.x.ai/v1",
         )
-
-    def _init_responses_client(self):
-        """Prepara headers para Responses API (com search tools)."""
-        self._api_key = cfg.XAI_API_KEY
-        self._base_url = "https://api.x.ai/v1"
+        self._search_cache: str | None = None
+        self._search_iter_count: int = 0
 
     def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
         if self.use_search:
-            return self._call_with_search(user_msg)
+            self._maybe_refresh_search()
+        if self._search_cache:
+            user_msg = self._search_cache + "\n\n" + user_msg
         return self._call_chat(user_msg)
 
     def _call_chat(self, user_msg: str) -> tuple[str, int, int]:
-        """Chat completions padrao (sem search)."""
+        """Chat completions (usado em todas as iteracoes)."""
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=1024,
@@ -426,37 +418,52 @@ class XAIAnalyst(BaseAnalyst):
         output_tokens = response.usage.completion_tokens
         return text, input_tokens, output_tokens
 
-    def _call_with_search(self, user_msg: str) -> tuple[str, int, int]:
-        """Responses API com x_search + web_search para sentimento em tempo real."""
+    def _maybe_refresh_search(self):
+        """Atualiza cache de sentimento do X a cada N iteracoes."""
+        self._search_iter_count += 1
+        cache_every = cfg.XAI_SEARCH_CACHE_ITERATIONS
+        if self._search_cache and self._search_iter_count < cache_every:
+            logger.info(f"[GROK] Usando sentimento cacheado ({self._search_iter_count}/{cache_every})")
+            return
+        self._search_iter_count = 0
+        try:
+            self._search_cache = self._fetch_sentiment()
+            logger.info("[GROK] Sentimento do X atualizado via search")
+        except Exception as e:
+            logger.warning(f"[GROK] Erro ao buscar sentimento: {e}")
+
+    def _fetch_sentiment(self) -> str:
+        """Busca sentimento via Responses API (x_search + web_search)."""
         import requests as req
 
-        search_prompt = (
-            "Antes de analisar os indicadores tecnicos, busque informacoes recentes sobre Bitcoin: "
-            "1) Sentimento atual no X (Twitter) sobre BTC — bullish ou bearish? "
-            "2) Noticias recentes que podem impactar o preco do Bitcoin. "
-            "3) Nivel de medo/ganancia do mercado crypto. "
-            "Use essas informacoes como CONTEXTO adicional junto com os indicadores tecnicos abaixo.\n\n"
-        )
-
         payload = {
-            "model": self.model,
-            "instructions": _build_system_prompt(),
-            "input": search_prompt + user_msg,
+            "model": cfg.XAI_SEARCH_MODEL,
+            "instructions": (
+                "Voce e um analista de sentimento de mercado crypto. "
+                "Resuma de forma concisa (max 5 frases) o sentimento atual sobre Bitcoin."
+            ),
+            "input": (
+                "Busque informacoes recentes sobre Bitcoin: "
+                "1) Sentimento atual no X (Twitter) sobre BTC — bullish ou bearish? "
+                "2) Noticias recentes que podem impactar o preco do Bitcoin. "
+                "3) Nivel de medo/ganancia do mercado crypto. "
+                "Resuma tudo de forma concisa para um trader."
+            ),
             "tools": [
                 {"type": "x_search"},
                 {"type": "web_search"},
             ],
             "temperature": 0.1,
-            "max_output_tokens": 2048,
+            "max_output_tokens": 512,
         }
 
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"Bearer {cfg.XAI_API_KEY}",
             "Content-Type": "application/json",
         }
 
         resp = req.post(
-            f"{self._base_url}/responses",
+            f"https://api.x.ai/v1/responses",
             json=payload,
             headers=headers,
             timeout=120,
@@ -464,7 +471,6 @@ class XAIAnalyst(BaseAnalyst):
         resp.raise_for_status()
         data = resp.json()
 
-        # Extrair texto da resposta (pode ter multiplos output items)
         text = ""
         for item in data.get("output", []):
             if item.get("type") == "message":
@@ -475,9 +481,4 @@ class XAIAnalyst(BaseAnalyst):
         if not text:
             raise ValueError("Resposta vazia da API xAI Responses")
 
-        text = text.strip()
-        usage = data.get("usage", {})
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-
-        return text, input_tokens, output_tokens
+        return "=== SENTIMENTO DO X (TWITTER) ===\n" + text.strip()
