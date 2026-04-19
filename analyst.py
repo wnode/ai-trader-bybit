@@ -381,11 +381,9 @@ class OpenAIAnalyst(BaseAnalyst):
 class XAIAnalyst(BaseAnalyst):
     """xAI Grok — suporta x_search e web_search para sentimento em tempo real."""
 
-    SEARCH_MODEL = "grok-4-1-fast-non-reasoning"
-
     def __init__(self):
         self.use_search = cfg.XAI_SEARCH
-        model = self.SEARCH_MODEL if self.use_search else cfg.XAI_MODEL
+        model = cfg.XAI_SEARCH_MODEL if self.use_search else cfg.XAI_MODEL
         super().__init__("GROK", model)
         if self.use_search:
             self._init_responses_client()
