@@ -380,7 +380,8 @@ class OpenAIAnalyst(BaseAnalyst):
 
 class XAIAnalyst(BaseAnalyst):
     """xAI Grok — suporta x_search e web_search para sentimento em tempo real.
-    Search e cacheado por N iteracoes para economizar creditos."""
+    Search e cacheado por N iteracoes para economizar creditos.
+    Monitor de sentimento detecta mudancas bruscas e forca analise."""
 
     def __init__(self):
         self.use_search = cfg.XAI_SEARCH
@@ -392,6 +393,8 @@ class XAIAnalyst(BaseAnalyst):
         )
         self._search_cache: str | None = None
         self._search_iter_count: int = 0
+        self._last_urgency: int = 0
+        self.sentiment_alert: bool = False
 
     def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
         if self.use_search:
@@ -426,27 +429,61 @@ class XAIAnalyst(BaseAnalyst):
             logger.info(f"[GROK] Usando sentimento cacheado ({self._search_iter_count}/{cache_every})")
             return
         self._search_iter_count = 0
+        self._do_search()
+
+    def _do_search(self):
+        """Executa busca de sentimento e atualiza cache."""
         try:
-            self._search_cache = self._fetch_sentiment()
-            logger.info("[GROK] Sentimento do X atualizado via search")
+            text, urgency = self._fetch_sentiment()
+            self._search_cache = text
+            self._last_urgency = urgency
+            self.sentiment_alert = False
+            logger.info(f"[GROK] Sentimento atualizado (urgencia={urgency}/10)")
         except Exception as e:
             logger.warning(f"[GROK] Erro ao buscar sentimento: {e}")
 
-    def _fetch_sentiment(self) -> str:
-        """Busca sentimento via Responses API (x_search + web_search)."""
+    def check_sentiment_shift(self) -> bool:
+        """Checa se houve mudanca brusca no sentimento. Chamado durante o sleep."""
+        if not self.use_search:
+            return False
+        try:
+            _, urgency = self._fetch_sentiment()
+            diff = abs(urgency - self._last_urgency)
+            if diff >= 3 or urgency >= 8:
+                logger.info(f"[ALERT] Mudanca de sentimento detectada! "
+                            f"urgencia: {self._last_urgency} -> {urgency} (diff={diff})")
+                self._last_urgency = urgency
+                self.sentiment_alert = True
+                self._search_iter_count = 0
+                return True
+            logger.info(f"[MONITOR] Sentimento estavel (urgencia={urgency}/10, diff={diff})")
+            return False
+        except Exception as e:
+            logger.warning(f"[MONITOR] Erro ao checar sentimento: {e}")
+            return False
+
+    def _fetch_sentiment(self) -> tuple[str, int]:
+        """Busca sentimento via Responses API. Retorna (texto, urgencia 1-10)."""
         import requests as req
 
         payload = {
             "model": cfg.XAI_SEARCH_MODEL,
             "instructions": (
                 "Voce e um analista de sentimento de mercado crypto. "
-                "Resuma de forma concisa (max 5 frases) o sentimento atual sobre Bitcoin."
+                "Responda em JSON com dois campos:\n"
+                "1) \"summary\": resumo conciso (max 5 frases) do sentimento atual sobre Bitcoin\n"
+                "2) \"urgency\": numero de 1 a 10 indicando urgencia para traders:\n"
+                "   1-3 = mercado calmo, sem noticias relevantes\n"
+                "   4-6 = noticias moderadas, sentimento mudando\n"
+                "   7-8 = noticia importante (regulacao, hack, grande movimentacao)\n"
+                "   9-10 = evento critico (crash, ban, black swan)\n"
+                "Responda APENAS o JSON, sem markdown."
             ),
             "input": (
                 "Busque informacoes recentes sobre Bitcoin: "
                 "1) Sentimento atual no X (Twitter) sobre BTC — bullish ou bearish? "
                 "2) Noticias recentes que podem impactar o preco do Bitcoin. "
-                "3) Nivel de medo/ganancia do mercado crypto. "
+                "3) Algum evento critico acontecendo agora? "
                 "Resuma tudo de forma concisa para um trader."
             ),
             "tools": [
@@ -481,4 +518,14 @@ class XAIAnalyst(BaseAnalyst):
         if not text:
             raise ValueError("Resposta vazia da API xAI Responses")
 
-        return "=== SENTIMENTO DO X (TWITTER) ===\n" + text.strip()
+        text = text.strip()
+        urgency = 3
+        try:
+            parsed = json.loads(text)
+            summary = parsed.get("summary", text)
+            urgency = max(1, min(10, int(parsed.get("urgency", 3))))
+            text = summary
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        return "=== SENTIMENTO DO X (TWITTER) ===\n" + text, urgency

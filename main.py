@@ -185,11 +185,29 @@ def main():
             break
 
         # Sleep — intervalo dinamico: 60s com posicao aberta, CHECK_INTERVAL sem
+        # Monitor de sentimento checa a cada SENTIMENT_MONITOR_INTERVAL segundos
         interval = 60 if executor.active_trade else cfg.CHECK_INTERVAL
-        logger.info(f"[SLEEP] Aguardando {interval}s{'  (posicao aberta)' if executor.active_trade else ''}...")
+        monitor_interval = cfg.SENTIMENT_MONITOR_INTERVAL
+        use_monitor = (hasattr(analyst, 'check_sentiment_shift')
+                       and analyst.use_search
+                       and not executor.active_trade
+                       and monitor_interval > 0)
+
+        if use_monitor:
+            logger.info(f"[SLEEP] Aguardando {interval}s (monitor sentimento a cada {monitor_interval}s)...")
+        else:
+            logger.info(f"[SLEEP] Aguardando {interval}s{'  (posicao aberta)' if executor.active_trade else ''}...")
+
         try:
-            for _ in range(interval):
+            elapsed = 0
+            while elapsed < interval:
+                # Checa sentimento periodicamente durante o sleep
+                if use_monitor and elapsed > 0 and elapsed % monitor_interval == 0:
+                    if analyst.check_sentiment_shift():
+                        logger.info(f"[ALERT] Interrompendo sleep — mudanca brusca de sentimento!")
+                        break
                 time.sleep(1)
+                elapsed += 1
         except KeyboardInterrupt:
             logger.info("[STOP] Bot parado pelo usuario")
             break

@@ -101,6 +101,9 @@ XAI_MODEL = os.getenv("XAI_MODEL", "grok-3-mini")
 XAI_SEARCH_MODEL = os.getenv("XAI_SEARCH_MODEL", "grok-4-1-fast-non-reasoning")
 XAI_SEARCH_CACHE_ITERATIONS = _get_int("XAI_SEARCH_CACHE_ITERATIONS", "6")
 
+# Sentimento
+SENTIMENT_MONITOR_INTERVAL = _get_int("SENTIMENT_MONITOR_INTERVAL", "120")
+
 # Validacoes
 VALID_PROVIDERS = ("google", "anthropic", "openai", "xai")
 if LLM_PROVIDER not in VALID_PROVIDERS:
