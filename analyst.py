@@ -81,6 +81,15 @@ CLOSE so em situacoes EXCEPCIONAIS:
 - Volume anormal: >3x a media CONTRA sua posicao
 - Invalidacao total: a tese que motivou a entrada nao e mais valida por multiplos fatores
 
+=== REGRA ANTI-ANTECIPACAO (MUITO IMPORTANTE) ===
+
+NAO tente pegar fundos ou topos. Espere a reversao CONFIRMAR antes de entrar.
+- Se o preco esta em queda, NAO abra LONG esperando que "ja caiu o suficiente"
+- Se o preco esta em alta, NAO abra SHORT esperando que "ja subiu o suficiente"
+- Para entrar CONTRA a tendencia atual, exija que as EMAs JA tenham cruzado na sua direcao
+- MACD virando nao basta — espere as EMAs confirmarem a mudanca de tendencia
+- Sentimento de medo (Fear) NAO e motivo para antecipar fundo — o mercado pode cair mais
+
 === FORMATO DE RESPOSTA (JSON) ===
 
 Responda SEMPRE em JSON valido com esta estrutura:
