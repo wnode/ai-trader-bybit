@@ -29,6 +29,7 @@ from analyst import create_analyst
 from executor import TradeExecutor
 from monitor import show_status
 from sentiment import SentimentData
+from stream import StreamAlertManager
 import db
 
 # Logging — console + arquivo
@@ -107,10 +108,14 @@ def main():
     db.init_db()
     market = MarketData()
     sentiment = SentimentData()
+    stream_mgr = StreamAlertManager()
     analyst = create_analyst()
     executor = TradeExecutor()
 
     print_banner(dry_run, analyst)
+
+    # Iniciar stream do X (se configurado)
+    stream_mgr.start()
 
     # Handler para SIGTERM (shutdown gracioso)
     def _signal_handler(signum, frame):
@@ -147,6 +152,13 @@ def main():
             if sentiment_text:
                 market_text += "\n\n" + sentiment_text
 
+            # 1c. Alertas do X em tempo real (stream)
+            stream_mgr.check_alerts()
+            stream_text = stream_mgr.format_for_llm()
+            if stream_text:
+                market_text += "\n\n" + stream_text
+                stream_mgr.clear_alerts()
+
             # 2. Envia a LLM
             logger.info(f"[LLM] Analisando com {analyst.provider_name} {analyst.model}...")
             decision = analyst.analyze(market_text)
@@ -169,6 +181,7 @@ def main():
 
         except KeyboardInterrupt:
             logger.info("[STOP] Bot parado pelo usuario")
+            stream_mgr.stop()
             break
         except Exception as e:
             consecutive_errors += 1
@@ -185,31 +198,44 @@ def main():
             break
 
         # Sleep — intervalo dinamico: 60s com posicao aberta, CHECK_INTERVAL sem
-        # Monitor de sentimento checa a cada SENTIMENT_MONITOR_INTERVAL segundos
+        # Monitores: stream do X (a cada 1s) + polling xAI (a cada SENTIMENT_MONITOR_INTERVAL)
         interval = 60 if executor.active_trade else cfg.CHECK_INTERVAL
         monitor_interval = cfg.SENTIMENT_MONITOR_INTERVAL
-        use_monitor = (hasattr(analyst, 'check_sentiment_shift')
-                       and analyst.use_search
-                       and not executor.active_trade
-                       and monitor_interval > 0)
+        use_xai_monitor = (hasattr(analyst, 'check_sentiment_shift')
+                           and analyst.use_search
+                           and not executor.active_trade
+                           and monitor_interval > 0)
+        use_stream = cfg.X_STREAM_ENABLED
 
-        if use_monitor:
-            logger.info(f"[SLEEP] Aguardando {interval}s (monitor sentimento a cada {monitor_interval}s)...")
+        parts = []
+        if use_stream:
+            parts.append("stream X")
+        if use_xai_monitor:
+            parts.append(f"polling xAI {monitor_interval}s")
+        if parts:
+            logger.info(f"[SLEEP] Aguardando {interval}s (monitorando: {', '.join(parts)})...")
         else:
             logger.info(f"[SLEEP] Aguardando {interval}s{'  (posicao aberta)' if executor.active_trade else ''}...")
 
         try:
             elapsed = 0
             while elapsed < interval:
-                # Checa sentimento periodicamente durante o sleep
-                if use_monitor and elapsed > 0 and elapsed % monitor_interval == 0:
+                # Stream do X: checa fila a cada segundo (< 1s de delay)
+                if use_stream and stream_mgr.check_alerts():
+                    logger.info("[ALERT] Tweet urgente detectado — forcando analise!")
+                    break
+
+                # Polling xAI: checa sentimento periodicamente
+                if use_xai_monitor and elapsed > 0 and elapsed % monitor_interval == 0:
                     if analyst.check_sentiment_shift():
-                        logger.info(f"[ALERT] Interrompendo sleep — mudanca brusca de sentimento!")
+                        logger.info("[ALERT] Mudanca brusca de sentimento — forcando analise!")
                         break
+
                 time.sleep(1)
                 elapsed += 1
         except KeyboardInterrupt:
             logger.info("[STOP] Bot parado pelo usuario")
+            stream_mgr.stop()
             break
 
 

@@ -104,6 +104,12 @@ XAI_SEARCH_CACHE_ITERATIONS = _get_int("XAI_SEARCH_CACHE_ITERATIONS", "6")
 # Sentimento
 SENTIMENT_MONITOR_INTERVAL = _get_int("SENTIMENT_MONITOR_INTERVAL", "120")
 
+# X API v2 Stream (tempo real)
+X_STREAM_ENABLED = _get_bool("X_STREAM_ENABLED", "false")
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "")
+X_STREAM_KEYWORDS = os.getenv("X_STREAM_KEYWORDS", "bitcoin,btc,crypto,#bitcoin,#btc")
+X_STREAM_URGENCY_THRESHOLD = _get_int("X_STREAM_URGENCY_THRESHOLD", "7")
+
 # Validacoes
 VALID_PROVIDERS = ("google", "anthropic", "openai", "xai")
 if LLM_PROVIDER not in VALID_PROVIDERS:
