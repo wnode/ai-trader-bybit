@@ -132,6 +132,14 @@ class TradeExecutor:
         if entry is None or sl is None or tp is None:
             return "Entry/SL/TP nao definidos — ignorando"
 
+        # Forcar TP = MIN_RR_RATIO x distancia do SL
+        sl_dist = abs(entry - sl)
+        if action == "LONG":
+            tp = round(entry + sl_dist * cfg.MIN_RR_RATIO, 2)
+        else:
+            tp = round(entry - sl_dist * cfg.MIN_RR_RATIO, 2)
+        logger.info(f"[TP] Calculado: entry=${entry:,.2f} SL=${sl:,.2f} TP=${tp:,.2f} (R:R={cfg.MIN_RR_RATIO}:1)")
+
         qty = self.calc_position_size(entry, sl)
         if qty <= 0:
             return "Qty zero — risco muito baixo para abrir posicao"
