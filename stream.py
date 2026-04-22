@@ -19,29 +19,56 @@ STREAM_URL = "https://api.x.com/2/tweets/search/stream"
 RULES_URL = "https://api.x.com/2/tweets/search/stream/rules"
 
 URGENT_KEYWORDS = {
-    "crash", "hack", "hacked", "exploit", "ban", "banned", "sec",
-    "etf", "approved", "rejected", "liquidat", "whale", "dump",
-    "pump", "flash crash", "black swan", "regulation", "arrest",
-    "fraud", "insolvent", "bankrupt", "emergency", "breaking",
+    "flash crash", "black swan", "hacked", "exploit",
+    "banned", "insolvent", "bankrupt", "liquidated",
+    "etf approved", "etf rejected", "sec charges",
 }
 
 HIGH_KEYWORDS = {
-    "fed", "fomc", "interest rate", "inflation", "cpi",
-    "halving", "fork", "upgrade", "lawsuit", "subpoena",
-    "treasury", "executive order", "tariff",
+    "hack", "crash", "dump", "whale alert",
+    "rate cut", "rate hike", "fomc", "interest rate", "cpi data",
+    "halving", "fork", "lawsuit", "subpoena",
+    "executive order", "tariff", "etf",
 }
 
+MIN_ENGAGEMENT_RT = 50
+MIN_ENGAGEMENT_LIKES = 100
 
-def _classify_urgency(text: str) -> int:
-    """Classifica urgencia de um tweet (1-10) baseado em keywords."""
+
+def _is_spam(text: str) -> bool:
+    """Filtra spam e tweets irrelevantes."""
     lower = text.lower()
+    spam_signals = [
+        "ca:", "🚀", "airdrop", "giveaway", "free",
+        "join now", "don't miss", "100x", "1000x", "moonshot",
+        "buy signal", "gem alert", "nfa", "dyor", "pump",
+        "skyrocket", "to the moon",
+    ]
+    matches = sum(1 for s in spam_signals if s in lower)
+    return matches >= 2
+
+
+def _classify_urgency(text: str, retweets: int = 0, likes: int = 0) -> int:
+    """Classifica urgencia de um tweet (1-10) baseado em keywords + engajamento."""
+    lower = text.lower()
+
+    score = 3
     for kw in URGENT_KEYWORDS:
         if kw in lower:
-            return 9
-    for kw in HIGH_KEYWORDS:
-        if kw in lower:
-            return 7
-    return 3
+            score = 9
+            break
+    if score < 9:
+        for kw in HIGH_KEYWORDS:
+            if kw in lower:
+                score = 7
+                break
+
+    if retweets > 5000 or likes > 10000:
+        score = min(10, score + 2)
+    elif retweets > 1000 or likes > 5000:
+        score = min(10, score + 1)
+
+    return score
 
 
 class XStreamListener:
@@ -160,13 +187,17 @@ class XStreamListener:
                 if not text:
                     continue
 
-                urgency = _classify_urgency(text)
+                if _is_spam(text):
+                    continue
+
                 metrics = tweet.get("public_metrics", {})
                 retweets = metrics.get("retweet_count", 0)
                 likes = metrics.get("like_count", 0)
 
-                if retweets > 1000 or likes > 5000:
-                    urgency = min(10, urgency + 2)
+                if retweets < MIN_ENGAGEMENT_RT and likes < MIN_ENGAGEMENT_LIKES:
+                    continue
+
+                urgency = _classify_urgency(text, retweets, likes)
 
                 if urgency >= self._urgency_threshold:
                     alert = {
