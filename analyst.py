@@ -59,6 +59,9 @@ Para ABRIR posicao, exija CONFLUENCIA DE NO MINIMO 3 dos 5 sinais abaixo:
 === REGRAS DE ENTRADA (LONG/SHORT) ===
 
 1. Exija no minimo 3 confluencias dos 5 sinais acima
+   - OBRIGATORIO: pelo menos 1 sinal de MOMENTUM (MACD ou Volume) deve estar presente
+   - Trend + RSI + Bollinger sozinhos NAO sao suficientes — falta confirmacao de forca
+   - Se MACD e Volume estiverem ambos ausentes, retorne HOLD mesmo com 3 confluencias
 2. Entry = preco atual de mercado (sera executado como Market order)
 3. Stop Loss: entre {cfg.SL_MIN_PCT}% e {cfg.SL_MAX_PCT}% do preco de entrada
    - Posicione o SL em nivel tecnico (abaixo de suporte para LONG, acima de resistencia para SHORT)
