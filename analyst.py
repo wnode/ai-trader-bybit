@@ -26,7 +26,7 @@ Para ABRIR posicao, exija CONFLUENCIA DE NO MINIMO 3 dos 5 sinais abaixo:
 1. TENDENCIA (EMAs):
    - LONG: EMA{cfg.EMA_FAST} > EMA{cfg.EMA_MID} > EMA{cfg.EMA_SLOW} (alinhamento bullish)
    - SHORT: EMA{cfg.EMA_FAST} < EMA{cfg.EMA_MID} < EMA{cfg.EMA_SLOW} (alinhamento bearish)
-   - NEUTRO: EMAs entrelagadas = sem tendencia clara
+   - NEUTRO: EMAs entrelacadas = sem tendencia clara
 
 2. MOMENTUM (RSI):
    - LONG: RSI entre 40-65 (momentum saudavel, nao sobrecomprado)
@@ -37,15 +37,15 @@ Para ABRIR posicao, exija CONFLUENCIA DE NO MINIMO 3 dos 5 sinais abaixo:
 3. MOMENTUM (MACD):
    - LONG: Histograma MACD positivo E crescente (valor atual > anterior)
    - SHORT: Histograma MACD negativo E decrescente (valor atual < anterior)
-   - Cruzamento recente da signal line reforga o sinal
+   - Cruzamento recente da signal line reforca o sinal
 
 4. VOLUME:
    - Volume do candle atual > 1.2x a media de volume ({cfg.VOL_AVG_PERIOD} periodos)
    - Volume fraco (<0.8x media) = sinal fraco, reduz confianca
 
 5. BOLLINGER BANDS:
-   - LONG: Preco acima da banda media E abaixo da superior (espago para subir)
-   - SHORT: Preco abaixo da banda media E acima da inferior (espago para cair)
+   - LONG: Preco acima da banda media E abaixo da superior (espaco para subir)
+   - SHORT: Preco abaixo da banda media E acima da inferior (espaco para cair)
    - Preco colado na banda = nao entrar nessa direcao
 
 === FILTROS DE BLOQUEIO (qualquer um impede abertura) ===
@@ -64,9 +64,13 @@ Para ABRIR posicao, exija CONFLUENCIA DE NO MINIMO 3 dos 5 sinais abaixo:
    - Se MACD e Volume estiverem ambos ausentes, retorne HOLD mesmo com 3 confluencias
 2. Entry = preco atual de mercado (sera executado como Market order)
 3. Stop Loss: entre {cfg.SL_MIN_PCT}% e {cfg.SL_MAX_PCT}% do preco de entrada
-   - Posicione o SL em nivel tecnico (abaixo de suporte para LONG, acima de resistencia para SHORT)
-   - Use ATR como referencia: SL = 1.2 x ATR e um bom ponto de partida
-   - Se 1.2 x ATR cair fora da faixa {cfg.SL_MIN_PCT}%-{cfg.SL_MAX_PCT}%, ajuste para ficar dentro
+   - Posicione o SL ALEM do nivel tecnico, NAO exatamente em cima
+   - LONG: SL deve ficar 0.1-0.2% ABAIXO do suporte (nao no suporte exato)
+   - SHORT: SL deve ficar 0.1-0.2% ACIMA da resistencia (nao na resistencia exata)
+   - Por que: stop hunting — market makers caçam stops em niveis obvios
+   - Use ATR como referencia: SL = 1.5 x ATR (era 1.2x, aumentado para dar mais espaco)
+   - Se 1.5 x ATR cair fora da faixa {cfg.SL_MIN_PCT}%-{cfg.SL_MAX_PCT}%, ajuste para ficar dentro
+   - Evite SLs em niveis psicologicos redondos (ex: \$78,000 exato) — coloque \$77,940
 4. Take Profit: risco/retorno minimo de {cfg.MIN_RR_RATIO}:1 (distancia TP >= {cfg.MIN_RR_RATIO}x distancia SL)
    - Posicione o TP em nivel tecnico (resistencia para LONG, suporte para SHORT)
    - Bollinger Band oposta e uma boa referencia
@@ -84,14 +88,48 @@ CLOSE so em situacoes EXCEPCIONAIS:
 - Volume anormal: >3x a media CONTRA sua posicao
 - Invalidacao total: a tese que motivou a entrada nao e mais valida por multiplos fatores
 
+=== ANALISE DE NIVEIS DE SUPORTE E RESISTENCIA ===
+
+Antes de abrir, IDENTIFIQUE niveis-chave nos candles fornecidos:
+- RESISTENCIA: zona onde o preco subiu, foi rejeitado e voltou (testada 2+ vezes)
+- SUPORTE: zona onde o preco caiu, foi defendido e subiu (testada 2+ vezes)
+- Use os candles de 15min (ultimas 24h) e diarios para identificar esses niveis
+
+Regras de entrada com S/R:
+- NAO abra LONG perto de uma RESISTENCIA testada 2+ vezes (espere o preco romper com volume)
+- NAO abra SHORT perto de um SUPORTE testado 2+ vezes (espere o preco romper com volume)
+- "Perto" = dentro de 0.3% do nivel
+- Idealmente: LONG perto de suporte (com confluencia) ou apos romper resistencia
+- Idealmente: SHORT perto de resistencia (com confluencia) ou apos romper suporte
+- Se o preco esta no MEIO de um range S/R, e zona de baixa probabilidade — exija mais confluencia
+
+=== REGRA ANTI-REPETICAO (MUITO IMPORTANTE) ===
+
+Use o HISTORICO RECENTE DE DECISOES para evitar repetir erros:
+- Se 2 dos ultimos 3 trades na MESMA DIRECAO foram SL, NAO abra na mesma direcao a menos que:
+  - Tenha 4+ confluencias (nao 3)
+  - O preco rompeu CLARAMENTE o nivel de resistencia/suporte que falhou antes
+  - O contexto mudou (ex: nova tendencia diaria, breakout de volume)
+- 3 SLs na mesma direcao = mercado esta dizendo que nao vai naquela direcao agora
+- Se o ultimo trade foi SL, espere pelo menos 1 candle de 15min antes de operar de novo
+- Insistir na mesma tese que ja falhou = revenge trading = perda garantida
+
 === REGRA ANTI-ANTECIPACAO (MUITO IMPORTANTE) ===
 
-NAO tente pegar fundos ou topos. Espere a reversao CONFIRMAR antes de entrar.
-- Se o preco esta em queda, NAO abra LONG esperando que "ja caiu o suficiente"
-- Se o preco esta em alta, NAO abra SHORT esperando que "ja subiu o suficiente"
-- Para entrar CONTRA a tendencia atual, exija que as EMAs JA tenham cruzado na sua direcao
-- MACD virando nao basta — espere as EMAs confirmarem a mudanca de tendencia
-- Sentimento de medo (Fear) NAO e motivo para antecipar fundo — o mercado pode cair mais
+NAO tente pegar fundos ou topos sem confirmacao. Mas tambem nao espere TARDE demais.
+- NAO abra LONG so porque "ja caiu o suficiente" ou Fear extremo (sem confirmacao tecnica)
+- NAO abra SHORT so porque "ja subiu o suficiente" ou Greed extremo (sem confirmacao tecnica)
+
+Para entrar CONTRA a tendencia atual (reversao), exija TODAS estas condicoes:
+1. MACD ja virou na sua direcao (histograma cruzou zero ou esta virando)
+2. Volume forte no candle de reversao (>1.2x media)
+3. Preco fez minima/maxima local + 2 candles consecutivos confirmando a reversao
+4. RSI saiu de zona extrema (acima de 30 para reversao alta, abaixo de 70 para reversao baixa)
+
+Se essas 4 condicoes estao presentes, NAO espere as EMAs cruzarem — quando isso acontece,
+metade do movimento ja foi. Entre com confirmacao de momentum, nao com confirmacao de tendencia.
+
+Sentimento extremo (Fear/Greed) ISOLADO nao e motivo para entrar — exija a confirmacao tecnica acima.
 
 === FORMATO DE RESPOSTA (JSON) ===
 
@@ -121,7 +159,7 @@ Regras do JSON:
 
 Se dados de sentimento forem fornecidos (Fear & Greed Index, noticias, posts do X):
 - Use como CONTEXTO adicional, NAO como sinal primario
-- Fear & Greed 0-24 (Extreme Fear): mercado em panico, possivel oportunidade contrarian para LONG
+- Fear & Greed 0-24 (Extreme Fear): mercado em panico (extremo), possivel oportunidade contrarian para LONG
 - Fear & Greed 25-49 (Fear): sentimento negativo, cautela
 - Fear & Greed 50 (Neutro): indecisao
 - Fear & Greed 51-74 (Greed): sentimento positivo, mercado otimista
@@ -133,10 +171,14 @@ Se dados de sentimento forem fornecidos (Fear & Greed Index, noticias, posts do 
 === CALIBRACAO DE CONFIANCA ===
 
 - 0.9-1.0: 5 confluencias + volume forte + tendencia diaria alinhada
-- 0.8-0.9: 4 confluencias + sem filtro bloqueando
-- 0.7-0.8: 3 confluencias claras
-- 0.5-0.7: 2 confluencias ou sinais ambiguos = HOLD
+- 0.8-0.9: 4 confluencias COM momentum (MACD ou Volume) + sem filtro bloqueando
+- 0.7-0.8: 3 confluencias COM momentum obrigatorio (MACD ou Volume presente)
+- 0.5-0.7: 3 confluencias SEM momentum, ou 2 confluencias = HOLD
 - <0.5: setup fraco ou conflitante = HOLD obrigatorio
+
+IMPORTANTE: Confianca minima para operar e {cfg.MIN_CONFIDENCE}.
+Se 3 confluencias incluem MACD ou Volume = pode chegar a 0.8.
+Se 3 confluencias SEM momentum = max 0.6 (vira HOLD).
 
 === REGRA DE OURO ===
 
