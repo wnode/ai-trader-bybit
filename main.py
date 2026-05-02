@@ -111,15 +111,27 @@ def main():
     stream_mgr = StreamAlertManager()
     analyst = create_analyst()
 
-    # Cria um trader (market + executor) por simbolo
+    # Cria um trader (market + executor) por simbolo. Falha de um simbolo
+    # nao impede os outros — apenas e logada.
     traders = []
+    failed = []
     for sym in cfg.SYMBOLS:
-        traders.append({
-            "symbol": sym,
-            "market": MarketData(sym),
-            "executor": TradeExecutor(sym),
-        })
-    logger.info(f"[INIT] {len(traders)} simbolos configurados: {[t['symbol'] for t in traders]}")
+        try:
+            traders.append({
+                "symbol": sym,
+                "market": MarketData(sym),
+                "executor": TradeExecutor(sym),
+            })
+        except Exception as e:
+            failed.append(sym)
+            logger.error(f"[INIT] Falha ao inicializar trader {sym}: {e}")
+
+    if not traders:
+        logger.critical("[INIT] Nenhum trader inicializado com sucesso. Encerrando.")
+        sys.exit(1)
+
+    logger.info(f"[INIT] {len(traders)} simbolos OK: {[t['symbol'] for t in traders]}"
+                + (f" | {len(failed)} falharam: {failed}" if failed else ""))
 
     print_banner(dry_run, analyst)
 
@@ -150,9 +162,16 @@ def main():
             logger.info(f"[ITER {iteration}] {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
             # Sentimento e stream sao compartilhados entre todos os simbolos
+            # Drena fila do stream PRIMEIRO e limpa imediatamente para evitar
+            # descartar alertas que cheguem durante o processamento dos simbolos
             sentiment_text = sentiment.format_for_llm()
             stream_mgr.check_alerts()
             stream_text = stream_mgr.format_for_llm()
+            if stream_text:
+                stream_mgr.clear_alerts()
+
+            # Conta erros por simbolo para detectar falha sistemica
+            symbol_errors = 0
 
             # Itera por cada simbolo sequencialmente
             for trader in traders:
@@ -187,12 +206,13 @@ def main():
                     # 4. Registra no historico do simbolo
                     analyst.record_decision(decision, now.strftime("%H:%M"), result, symbol=sym)
                 except Exception as e:
+                    symbol_errors += 1
                     logger.error(f"[{sym}] [ERROR] Erro no ciclo: {e}", exc_info=True)
                     # Erro em um simbolo nao para o bot — continua com os outros
 
-            # Apos processar todos os simbolos, limpa alertas do stream
-            if stream_text:
-                stream_mgr.clear_alerts()
+            # Se TODOS os simbolos falharam, conta como erro consecutivo do bot
+            if symbol_errors > 0 and symbol_errors == len(traders):
+                raise RuntimeError(f"Todos os {len(traders)} simbolos falharam neste ciclo")
 
             # Status apos execucao (usa client do primeiro trader para queries de saldo)
             try:

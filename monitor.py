@@ -43,12 +43,16 @@ def show_balance(client: HTTP):
     return 0.0
 
 
-def show_position(client: HTTP, symbol: str = None):
+def show_position(client: HTTP, symbol: str = None, positions_cache: list | None = None):
+    """Exibe posicao de um simbolo. Se positions_cache for fornecido, usa em vez de chamar API."""
     sym = symbol or cfg.SYMBOL
-    result = _api_call(client, "get_positions", category="linear", symbol=sym)
-    positions = result.get("result", {}).get("list", [])
+    if positions_cache is not None:
+        positions = [p for p in positions_cache if p.get("symbol") == sym]
+    else:
+        result = _api_call(client, "get_positions", category="linear", symbol=sym)
+        positions = result.get("result", {}).get("list", [])
     if not positions:
-        print(f"  [{sym}] Posicao: indisponivel (resposta API vazia)")
+        print(f"  [{sym}] Nenhuma posicao aberta")
         return
     for p in positions:
         if float(p["size"]) > 0:
@@ -138,8 +142,15 @@ def show_status(client: HTTP):
 
     print()
     print(">> POSICOES ABERTAS")
+    # 1 chamada API com settleCoin=USDT para pegar todas as posicoes USDT de uma vez
+    try:
+        result = _api_call(client, "get_positions", category="linear", settleCoin="USDT")
+        all_positions = result.get("result", {}).get("list", [])
+    except Exception as e:
+        logger.warning(f"[MONITOR] Erro ao buscar posicoes: {e}")
+        all_positions = []
     for sym in cfg.SYMBOLS:
-        show_position(client, sym)
+        show_position(client, sym, positions_cache=all_positions)
 
     print()
     print(">> HISTORICO DE TRADES (todos os simbolos)")

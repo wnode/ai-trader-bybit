@@ -27,11 +27,13 @@ class TradeExecutor:
         self.active_trade = None
         self._min_qty: float | None = None
         self._qty_step: float | None = None
+        self._tick_size: float | None = None
+        self._price_decimals: int = 2
         self._fetch_instrument_info()
         self._restore_active_trade()
 
     def _fetch_instrument_info(self):
-        """Busca min qty e qty step do simbolo na Bybit. Cacheado por instancia."""
+        """Busca min_qty, qty_step e tick_size do simbolo na Bybit. Cacheado por instancia."""
         try:
             result = self._api_call(
                 "get_instruments_info",
@@ -42,11 +44,28 @@ class TradeExecutor:
                 lot = items[0].get("lotSizeFilter", {})
                 self._min_qty = float(lot.get("minOrderQty", "0.001"))
                 self._qty_step = float(lot.get("qtyStep", "0.001"))
-                logger.info(f"[{self.symbol}] minQty={self._min_qty} qtyStep={self._qty_step}")
+                price = items[0].get("priceFilter", {})
+                self._tick_size = float(price.get("tickSize", "0.01"))
+                # Calcular casas decimais a partir do tickSize
+                tick_str = price.get("tickSize", "0.01")
+                if "." in tick_str:
+                    self._price_decimals = len(tick_str.split(".")[1].rstrip("0"))
+                else:
+                    self._price_decimals = 0
+                logger.info(f"[{self.symbol}] minQty={self._min_qty} qtyStep={self._qty_step} "
+                            f"tickSize={self._tick_size} priceDecimals={self._price_decimals}")
         except Exception as e:
             logger.warning(f"[{self.symbol}] Erro ao buscar instrument info: {e} — usando defaults")
             self._min_qty = 0.001
             self._qty_step = 0.001
+            self._tick_size = 0.01
+            self._price_decimals = 2
+
+    def _round_price(self, price: float) -> float:
+        """Arredonda preco respeitando o tickSize do simbolo."""
+        tick = self._tick_size or 0.01
+        rounded = round(price / tick) * tick
+        return round(rounded, self._price_decimals)
 
     def _create_client(self) -> HTTP:
         return HTTP(
@@ -161,13 +180,14 @@ class TradeExecutor:
         if entry is None or sl is None or tp is None:
             return "Entry/SL/TP nao definidos — ignorando"
 
-        # Forcar TP = MIN_RR_RATIO x distancia do SL
+        # Forcar TP = MIN_RR_RATIO x distancia do SL, respeitando tickSize
         sl_dist = abs(entry - sl)
         if action == "LONG":
-            tp = round(entry + sl_dist * cfg.MIN_RR_RATIO, 2)
+            tp = self._round_price(entry + sl_dist * cfg.MIN_RR_RATIO)
         else:
-            tp = round(entry - sl_dist * cfg.MIN_RR_RATIO, 2)
-        logger.info(f"[TP] Calculado: entry=${entry:,.2f} SL=${sl:,.2f} TP=${tp:,.2f} (R:R={cfg.MIN_RR_RATIO}:1)")
+            tp = self._round_price(entry - sl_dist * cfg.MIN_RR_RATIO)
+        sl = self._round_price(sl)
+        logger.info(f"[{self.symbol}] [TP] Calculado: entry=${entry:,.2f} SL=${sl:,.2f} TP=${tp:,.2f} (R:R={cfg.MIN_RR_RATIO}:1)")
 
         qty = self.calc_position_size(entry, sl)
         if qty <= 0:
@@ -296,8 +316,8 @@ class TradeExecutor:
         """Define SL (Market) e TP (Limit, maker fee 0.020%) via set_trading_stop.
         Usa tpslMode=Partial para permitir tpOrderType=Limit.
         Se Limit falhar, tenta TP Market como fallback."""
-        sl_str = str(round(sl, 2))
-        tp_str = str(round(tp, 2))
+        sl_str = str(self._round_price(sl))
+        tp_str = str(self._round_price(tp))
         try:
             result = self._api_call(
                 "set_trading_stop",
@@ -416,36 +436,56 @@ class TradeExecutor:
             logger.warning(f"[STATE] Erro ao registrar fechamento no DB — active_trade mantido: {e}")
 
     def check_closed_by_exchange_for_order(self, order_id: str):
-        """Busca dados de fechamento para um order_id especifico."""
+        """Busca dados de fechamento para um order_id especifico do simbolo.
+        Valida que o trade fechado e do nosso ciclo via timestamp da abertura."""
         try:
-            # Buscar nas ordens do bot para encontrar o fechamento correto
+            # Buscar a abertura para validar que fechamento e do nosso trade
+            opened_ms = None
+            try:
+                open_orders = self._api_call(
+                    "get_order_history",
+                    category="linear", symbol=self.symbol, orderId=order_id, limit=1,
+                )
+                items = open_orders.get("result", {}).get("list", [])
+                if items:
+                    opened_ms = int(items[0].get("createdTime", "0"))
+            except Exception:
+                pass
+
+            # Buscar nas ordens do simbolo para encontrar o fechamento correto
             orders = self._api_call(
                 "get_order_history",
                 category="linear", symbol=self.symbol, limit=20,
             )
 
-            # Encontrar a ordem de TP ou SL que foi Filled
-            # TP/SL criados via set_trading_stop nao tem prefixo aitbot,
-            # mas como operamos uma posicao por vez, a mais recente e nossa
+            # Encontrar a ordem de TP ou SL que foi Filled APOS a abertura
             close_type = None
             for o in orders["result"]["list"]:
                 if (o["orderStatus"] == "Filled"
                         and o["stopOrderType"] in ("TakeProfit", "StopLoss")):
+                    if opened_ms and int(o.get("updatedTime", "0")) < opened_ms:
+                        continue  # fechamento antigo, ignorar
                     close_type = "TP" if o["stopOrderType"] == "TakeProfit" else "SL"
                     break
 
-            # Buscar PnL real no closed_pnl — pegar o mais recente
-            # Nota: orderId no closed_pnl e da ordem de FECHAMENTO, nao de abertura
+            # Buscar PnL real no closed_pnl — filtrar por timestamp da abertura
             closed = self._api_call(
                 "get_closed_pnl",
-                category="linear", symbol=self.symbol, limit=5,
+                category="linear", symbol=self.symbol, limit=10,
             )
             matched = None
-            if closed["result"]["list"]:
-                matched = closed["result"]["list"][0]  # mais recente
+            for item in closed["result"]["list"]:
+                # closed_pnl tem orderId da ordem de fechamento, nao da abertura
+                # Validamos pela proximidade temporal: createdTime >= opened_ms
+                if opened_ms:
+                    item_ms = int(item.get("createdTime", "0"))
+                    if item_ms < opened_ms:
+                        continue  # fechamento de trade anterior, ignorar
+                matched = item
+                break
 
             if not matched:
-                raise RuntimeError(f"closed_pnl vazio para {self.symbol}")
+                raise RuntimeError(f"closed_pnl vazio para {self.symbol} apos {opened_ms}")
 
             exit_price = float(matched["avgExitPrice"])
             pnl = float(matched["closedPnl"])

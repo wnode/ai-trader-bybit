@@ -64,10 +64,9 @@ def init_db():
                 conn.execute("ALTER TABLE trades ADD COLUMN symbol TEXT NOT NULL DEFAULT 'BTCUSDT'")
                 logger.info("[DB] Migracao v2: coluna 'symbol' adicionada (default BTCUSDT para trades existentes)")
 
-        if not row:
-            conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
-        elif current_version < SCHEMA_VERSION:
-            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+        # Garante idempotencia: limpa duplicatas e mantem 1 linha unica com a versao
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
         conn.commit()
     finally:
         conn.close()

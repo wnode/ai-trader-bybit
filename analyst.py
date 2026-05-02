@@ -14,9 +14,26 @@ import config as cfg
 logger = logging.getLogger(__name__)
 
 
-def _build_system_prompt() -> str:
-    """Constroi system prompt com valores da config."""
-    return f"""Voce e um trader profissional de Bitcoin Futures ({cfg.SYMBOL} perpetual) na Bybit.
+def _symbol_label(symbol: str) -> str:
+    """Retorna nome legivel do ativo a partir do simbolo (ex: BTCUSDT -> Bitcoin)."""
+    base = symbol.replace("USDT", "").upper()
+    labels = {
+        "BTC": "Bitcoin",
+        "ETH": "Ethereum",
+        "SOL": "Solana",
+        "XRP": "XRP",
+        "ADA": "Cardano",
+        "DOGE": "Dogecoin",
+        "BNB": "BNB",
+    }
+    return labels.get(base, base)
+
+
+def _build_system_prompt(symbol: str = None) -> str:
+    """Constroi system prompt com valores da config para um simbolo especifico."""
+    sym = symbol or cfg.SYMBOL
+    asset = _symbol_label(sym)
+    return f"""Voce e um trader profissional de {asset} Futures ({sym} perpetual) na Bybit.
 Voce opera com alavancagem {cfg.LEVERAGE}x em timeframe de {cfg.TIMEFRAME} minutos.
 
 === FRAMEWORK DE DECISAO ===
@@ -215,7 +232,7 @@ class BaseAnalyst:
         text = None
 
         try:
-            text, input_tokens, output_tokens = self._call_llm(user_msg)
+            text, input_tokens, output_tokens = self._call_llm(user_msg, symbol=symbol)
 
             # Extrai JSON da resposta
             if "```json" in text:
@@ -320,7 +337,7 @@ class BaseAnalyst:
                 return result
             raise
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         """Chama a LLM. Retorna (text, input_tokens, output_tokens). Override nos filhos."""
         raise NotImplementedError
 
@@ -368,12 +385,12 @@ class AnthropicAnalyst(BaseAnalyst):
         import anthropic
         self.client = anthropic.Anthropic(api_key=cfg.ANTHROPIC_API_KEY)
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         response = self.client.messages.create(
             model=self.model,
             max_tokens=1024,
             temperature=0.1,  # Baixa temperatura para consistencia
-            system=_build_system_prompt(),
+            system=_build_system_prompt(symbol),
             messages=[{"role": "user", "content": user_msg}]
         )
         if not response.content:
@@ -390,14 +407,14 @@ class GoogleAnalyst(BaseAnalyst):
         from google import genai
         self.client = genai.Client(api_key=cfg.GOOGLE_API_KEY)
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         from google.genai import types
 
         response = self.client.models.generate_content(
             model=self.model,
             contents=user_msg,
             config=types.GenerateContentConfig(
-                system_instruction=_build_system_prompt(),
+                system_instruction=_build_system_prompt(symbol),
                 max_output_tokens=2048,
                 temperature=0.1,  # Baixa temperatura para consistencia
                 response_mime_type="application/json",
@@ -420,13 +437,13 @@ class OpenAIAnalyst(BaseAnalyst):
         from openai import OpenAI
         self.client = OpenAI(api_key=cfg.OPENAI_API_KEY)
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=1024,
             temperature=0.1,  # Baixa temperatura para consistencia
             messages=[
-                {"role": "system", "content": _build_system_prompt()},
+                {"role": "system", "content": _build_system_prompt(symbol)},
                 {"role": "user", "content": user_msg},
             ]
         )
@@ -456,21 +473,21 @@ class XAIAnalyst(BaseAnalyst):
         self._last_urgency: int = 0
         self.sentiment_alert: bool = False
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         if self.use_search:
             self._maybe_refresh_search()
         if self._search_cache:
             user_msg = self._search_cache + "\n\n" + user_msg
-        return self._call_chat(user_msg)
+        return self._call_chat(user_msg, symbol)
 
-    def _call_chat(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_chat(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         """Chat completions (usado em todas as iteracoes)."""
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=1024,
             temperature=0.1,
             messages=[
-                {"role": "system", "content": _build_system_prompt()},
+                {"role": "system", "content": _build_system_prompt(symbol)},
                 {"role": "user", "content": user_msg},
             ]
         )
@@ -526,12 +543,15 @@ class XAIAnalyst(BaseAnalyst):
         """Busca sentimento via Responses API. Retorna (texto, urgencia 1-10)."""
         import requests as req
 
+        # Lista de ativos relevantes a partir dos simbolos configurados
+        assets = ", ".join(_symbol_label(s) for s in cfg.SYMBOLS)
+
         payload = {
             "model": cfg.XAI_SEARCH_MODEL,
             "instructions": (
                 "Voce e um analista de sentimento de mercado crypto. "
                 "Responda em JSON com dois campos:\n"
-                "1) \"summary\": resumo conciso (max 5 frases) do sentimento atual sobre Bitcoin\n"
+                "1) \"summary\": resumo conciso (max 5 frases) do sentimento atual no mercado crypto\n"
                 "2) \"urgency\": numero de 1 a 10 indicando urgencia para traders:\n"
                 "   1-3 = mercado calmo, sem noticias relevantes\n"
                 "   4-6 = noticias moderadas, sentimento mudando\n"
@@ -540,9 +560,9 @@ class XAIAnalyst(BaseAnalyst):
                 "Responda APENAS o JSON, sem markdown."
             ),
             "input": (
-                "Busque informacoes recentes sobre Bitcoin: "
-                "1) Sentimento atual no X (Twitter) sobre BTC — bullish ou bearish? "
-                "2) Noticias recentes que podem impactar o preco do Bitcoin. "
+                f"Busque informacoes recentes sobre o mercado crypto, com foco em: {assets}. "
+                "1) Sentimento atual no X (Twitter) sobre esses ativos — bullish ou bearish? "
+                "2) Noticias recentes que podem impactar os precos. "
                 "3) Algum evento critico acontecendo agora? "
                 "Resuma tudo de forma concisa para um trader."
             ),
