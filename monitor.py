@@ -43,11 +43,12 @@ def show_balance(client: HTTP):
     return 0.0
 
 
-def show_position(client: HTTP):
-    result = _api_call(client, "get_positions", category="linear", symbol=cfg.SYMBOL)
+def show_position(client: HTTP, symbol: str = None):
+    sym = symbol or cfg.SYMBOL
+    result = _api_call(client, "get_positions", category="linear", symbol=sym)
     positions = result.get("result", {}).get("list", [])
     if not positions:
-        print("  Posicao: indisponivel (resposta API vazia)")
+        print(f"  [{sym}] Posicao: indisponivel (resposta API vazia)")
         return
     for p in positions:
         if float(p["size"]) > 0:
@@ -59,89 +60,100 @@ def show_position(client: HTTP):
             sl = float(sl_str) if sl_str else 0.0
             tp = float(tp_str) if tp_str else 0.0
             side = "SHORT" if p["side"] == "Sell" else "LONG"
-            print(f"  {side} {p['size']} BTC @ ${entry:,.2f}")
-            print(f"  Preco atual: ${mark:,.2f}")
+            print(f"  [{sym}] {side} {p['size']} @ ${entry:,.2f}")
+            print(f"  [{sym}] Preco atual: ${mark:,.2f}")
             if sl or tp:
-                print(f"  TP: ${tp:,.2f} | SL: ${sl:,.2f}")
+                print(f"  [{sym}] TP: ${tp:,.2f} | SL: ${sl:,.2f}")
             pnl_icon = "+" if pnl >= 0 else ""
-            print(f"  PnL: {pnl_icon}${pnl:,.2f}")
+            print(f"  [{sym}] PnL: {pnl_icon}${pnl:,.2f}")
             return
-    print("  Nenhuma posicao aberta")
+    print(f"  [{sym}] Nenhuma posicao aberta")
 
 
-def show_history():
-    trades = db.get_all_trades()
+def show_history(symbol: str = None):
+    trades = db.get_all_trades(symbol)
     if not trades:
-        print("  Sem trades registrados")
+        label = f"[{symbol}] " if symbol else ""
+        print(f"  {label}Sem trades registrados")
         return
 
-    header = f"  {'#':<3} {'Data':<16} {'Side':<6} {'Qty':<8} {'Entry':>11} {'Exit':>11} {'PnL':>9} {'Tipo':<6} {'LLM'}"
+    header = f"  {'#':<3} {'Data':<14} {'Symbol':<8} {'Side':<6} {'Qty':<8} {'Entry':>11} {'Exit':>11} {'PnL':>9} {'Tipo':<6} {'LLM'}"
     print(header)
-    print("  " + "-" * 90)
+    print("  " + "-" * 100)
 
     for i, t in enumerate(trades):
         opened = t["opened_at"]
         try:
-            # Compativel com Python < 3.11 (remove +00:00 se presente)
             if opened.endswith("+00:00"):
                 opened = opened.replace("+00:00", "")
             dt = datetime.fromisoformat(opened)
         except (ValueError, TypeError, AttributeError):
-            dt = datetime(2000, 1, 1)  # fallback para datas malformadas
+            dt = datetime(2000, 1, 1)
         pnl = t["pnl"] if t["pnl"] is not None else 0.0
         exit_p = t["exit_price"] if t["exit_price"] is not None else 0.0
         close_type = t.get("close_type") or "?"
         llm = t.get("llm_provider") or ""
+        sym_t = t.get("symbol") or "?"
 
         print(
-            f"  {i+1:<3} {dt.strftime('%d/%m %H:%M'):<16} {t['side']:<6} {t['qty']:<8}"
+            f"  {i+1:<3} {dt.strftime('%d/%m %H:%M'):<14} {sym_t:<8} {t['side']:<6} {t['qty']:<8}"
             f" {t['entry_price']:>11,.2f} {exit_p:>11,.2f}"
             f" {pnl:>+9.2f} {close_type:<6} {llm}"
         )
 
-    print("  " + "-" * 90)
+    print("  " + "-" * 100)
 
 
-def show_stats():
-    stats = db.get_stats()
+def show_stats(symbol: str = None):
+    stats = db.get_stats(symbol)
     if not stats:
-        print("  Sem dados para estatisticas")
+        label = f"[{symbol}] " if symbol else ""
+        print(f"  {label}Sem dados para estatisticas")
         return
 
-    print(f"  Trades: {stats['total_trades']} | Wins: {stats['win_count']} | Losses: {stats['loss_count']}")
-    print(f"  Win rate: {stats['win_rate']:.1f}%")
-    print(f"  PnL total: ${stats['total_pnl']:+,.2f}")
-    print(f"  Media win: ${stats['avg_win']:+,.2f} | Media loss: ${stats['avg_loss']:+,.2f}")
+    label = f"[{symbol}] " if symbol else ""
+    print(f"  {label}Trades: {stats['total_trades']} | Wins: {stats['win_count']} | Losses: {stats['loss_count']}")
+    print(f"  {label}Win rate: {stats['win_rate']:.1f}%")
+    print(f"  {label}PnL total: ${stats['total_pnl']:+,.2f}")
+    print(f"  {label}Media win: ${stats['avg_win']:+,.2f} | Media loss: ${stats['avg_loss']:+,.2f}")
     pf = stats['profit_factor']
     pf_str = f"{pf:.2f}" if pf != float("inf") else "inf"
-    print(f"  Profit factor: {pf_str}")
-    print(f"  Max drawdown: ${stats['max_drawdown']:,.2f}")
-    print(f"  Fechamentos: TP={stats['tp_count']} | SL={stats['sl_count']} | CLOSE={stats['close_count']}")
+    print(f"  {label}Profit factor: {pf_str}")
+    print(f"  {label}Max drawdown: ${stats['max_drawdown']:,.2f}")
+    print(f"  {label}Fechamentos: TP={stats['tp_count']} | SL={stats['sl_count']} | CLOSE={stats['close_count']}")
 
 
 def show_status(client: HTTP):
-    """Exibe status completo: conta, posicao e historico."""
+    """Exibe status completo: conta, posicoes (todos os simbolos) e historico."""
     print()
-    print("=" * 50)
-    print(f"  MONITOR — {cfg.SYMBOL}")
+    print("=" * 60)
+    symbols_str = ", ".join(cfg.SYMBOLS)
+    print(f"  MONITOR — {symbols_str}")
     print(f"  {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-    print("=" * 50)
+    print("=" * 60)
 
     print()
     print(">> CONTA")
     show_balance(client)
 
     print()
-    print(">> POSICAO ABERTA")
-    show_position(client)
+    print(">> POSICOES ABERTAS")
+    for sym in cfg.SYMBOLS:
+        show_position(client, sym)
 
     print()
-    print(">> HISTORICO DE TRADES")
+    print(">> HISTORICO DE TRADES (todos os simbolos)")
     show_history()
 
     print()
-    print(">> ESTATISTICAS")
+    print(">> ESTATISTICAS GERAIS")
     show_stats()
+
+    if len(cfg.SYMBOLS) > 1:
+        for sym in cfg.SYMBOLS:
+            print()
+            print(f">> ESTATISTICAS {sym}")
+            show_stats(sym)
     print()
 
 

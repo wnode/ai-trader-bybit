@@ -202,16 +202,16 @@ def create_analyst() -> "BaseAnalyst":
 
 
 class BaseAnalyst:
-    """Base class para todos os analysts."""
+    """Base class para todos os analysts. Historico mantido por simbolo."""
 
     def __init__(self, provider_name: str, model: str):
         self.provider_name = provider_name
         self.model = model
-        self.trade_history: list[dict] = []
+        self.trade_history: dict[str, list[dict]] = {}
 
-    def analyze(self, market_data: str) -> dict:
-        """Envia dados a LLM e retorna decisao."""
-        user_msg = market_data + self._history_text()
+    def analyze(self, market_data: str, symbol: str = None) -> dict:
+        """Envia dados a LLM e retorna decisao. Historico por simbolo."""
+        user_msg = market_data + self._history_text(symbol)
         text = None
 
         try:
@@ -324,11 +324,14 @@ class BaseAnalyst:
         """Chama a LLM. Retorna (text, input_tokens, output_tokens). Override nos filhos."""
         raise NotImplementedError
 
-    def _history_text(self) -> str:
-        if not self.trade_history:
+    def _history_text(self, symbol: str = None) -> str:
+        key = symbol or "_default"
+        history = self.trade_history.get(key, [])
+        if not history:
             return ""
-        recent = self.trade_history[-10:]
-        lines = ["\n\n=== HISTORICO RECENTE DE DECISOES ==="]
+        recent = history[-10:]
+        header = f"\n\n=== HISTORICO RECENTE DE DECISOES ({symbol}) ===" if symbol else "\n\n=== HISTORICO RECENTE DE DECISOES ==="
+        lines = [header]
         for h in recent:
             conf = h.get('confidence', 0)
             try:
@@ -341,8 +344,11 @@ class BaseAnalyst:
                 lines.append(f"    -> Resultado: {h['result']}")
         return "\n".join(lines)
 
-    def record_decision(self, decision: dict, timestamp: str, result: str = None):
-        self.trade_history.append({
+    def record_decision(self, decision: dict, timestamp: str, result: str = None, symbol: str = None):
+        key = symbol or "_default"
+        if key not in self.trade_history:
+            self.trade_history[key] = []
+        self.trade_history[key].append({
             "time": timestamp,
             "action": decision["action"],
             "confidence": decision.get("confidence", 0),
@@ -350,8 +356,8 @@ class BaseAnalyst:
             "reason": decision.get("reason", ""),
             "result": result,
         })
-        if len(self.trade_history) > 50:
-            self.trade_history = self.trade_history[-50:]
+        if len(self.trade_history[key]) > 50:
+            self.trade_history[key] = self.trade_history[key][-50:]
 
 
 class AnthropicAnalyst(BaseAnalyst):

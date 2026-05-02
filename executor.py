@@ -19,12 +19,34 @@ RETRY_DELAY = 2
 
 
 class TradeExecutor:
-    """Executa trades na Bybit baseado nas decisoes da LLM."""
+    """Executa trades na Bybit baseado nas decisoes da LLM. Um executor por simbolo."""
 
-    def __init__(self):
+    def __init__(self, symbol: str = None):
+        self.symbol = symbol or cfg.SYMBOL
         self.client = self._create_client()
         self.active_trade = None
+        self._min_qty: float | None = None
+        self._qty_step: float | None = None
+        self._fetch_instrument_info()
         self._restore_active_trade()
+
+    def _fetch_instrument_info(self):
+        """Busca min qty e qty step do simbolo na Bybit. Cacheado por instancia."""
+        try:
+            result = self._api_call(
+                "get_instruments_info",
+                category="linear", symbol=self.symbol,
+            )
+            items = result.get("result", {}).get("list", [])
+            if items:
+                lot = items[0].get("lotSizeFilter", {})
+                self._min_qty = float(lot.get("minOrderQty", "0.001"))
+                self._qty_step = float(lot.get("qtyStep", "0.001"))
+                logger.info(f"[{self.symbol}] minQty={self._min_qty} qtyStep={self._qty_step}")
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] Erro ao buscar instrument info: {e} — usando defaults")
+            self._min_qty = 0.001
+            self._qty_step = 0.001
 
     def _create_client(self) -> HTTP:
         return HTTP(
@@ -52,7 +74,7 @@ class TradeExecutor:
     def _restore_active_trade(self):
         """Restaura active_trade do DB se houver trade aberto e posicao na exchange."""
         try:
-            open_trade = db.get_open_trade()
+            open_trade = db.get_open_trade(self.symbol)
             if not open_trade:
                 return
             pos = self._get_position()
@@ -65,12 +87,12 @@ class TradeExecutor:
                     "qty": pos["size"],
                     "order_id": open_trade["order_id"],
                 }
-                logger.info(f"[RESTORE] Trade restaurado do DB: {open_trade['side']} {pos['size']} BTC")
+                logger.info(f"[{self.symbol}] [RESTORE] Trade restaurado do DB: {open_trade['side']} {pos['size']}")
             else:
                 # Posicao nao existe mais, fechar trade orfao no DB
                 self.check_closed_by_exchange_for_order(open_trade["order_id"])
         except Exception as e:
-            logger.warning(f"[RESTORE] Erro ao restaurar trade: {e}")
+            logger.warning(f"[{self.symbol}] [RESTORE] Erro ao restaurar trade: {e}")
 
     def get_balance(self) -> float:
         result = self._api_call(
@@ -83,7 +105,7 @@ class TradeExecutor:
         return 0.0
 
     def calc_position_size(self, entry: float, sl: float) -> float:
-        """Calcula tamanho da posicao baseado no risco."""
+        """Calcula tamanho da posicao baseado no risco. Respeita min_qty e qty_step do simbolo."""
         balance = self.get_balance()
         risk_amount = balance * cfg.RISK_PER_TRADE
         sl_dist = abs(entry - sl) / entry
@@ -91,11 +113,18 @@ class TradeExecutor:
             return 0.0
         notional = risk_amount / sl_dist
         qty = notional / entry
-        qty = round(qty, 3)
-        # Bybit min: 0.001 BTC — se qty minima excede o risco, pular trade
-        if qty < 0.001:
-            min_risk = 0.001 * abs(entry - sl)
-            logger.warning(f"[RISK] Qty calculada {qty} < minimo 0.001. "
+
+        # Arredondar para qty_step do simbolo
+        min_qty = self._min_qty or 0.001
+        step = self._qty_step or 0.001
+        qty = (qty // step) * step
+        # Numero de casas decimais baseado no step
+        decimals = max(0, len(f"{step:.10f}".rstrip("0").split(".")[1]) if "." in f"{step}" else 0)
+        qty = round(qty, decimals)
+
+        if qty < min_qty:
+            min_risk = min_qty * abs(entry - sl)
+            logger.warning(f"[{self.symbol}] [RISK] Qty calculada {qty} < minimo {min_qty}. "
                            f"Risco minimo seria ${min_risk:,.2f} vs budget ${risk_amount:,.2f}")
             return 0.0
         return qty
@@ -151,7 +180,7 @@ class TradeExecutor:
                 "side": side, "entry": entry, "sl": sl, "tp": tp,
                 "qty": qty, "reason": decision.get("reason", ""),
             }
-            return (f"[DRY] {action} {qty} BTC @ ${entry:,.2f} "
+            return (f"[{self.symbol}] [DRY] {action} {qty} @ ${entry:,.2f} "
                     f"SL=${sl:,.2f} TP=${tp:,.2f} "
                     f"(conf={decision.get('confidence', 0):.1f})")
 
@@ -159,7 +188,7 @@ class TradeExecutor:
             link_id = f"{ORDER_PREFIX}-{uuid.uuid4().hex[:16]}"
             order_params = {
                 "category": "linear",
-                "symbol": cfg.SYMBOL,
+                "symbol": self.symbol,
                 "side": side,
                 "orderType": "Market",
                 "qty": str(qty),
@@ -178,6 +207,7 @@ class TradeExecutor:
 
                 try:
                     db.record_open(
+                        symbol=self.symbol,
                         side=action, qty=qty, entry_price=real_entry,
                         stop_loss=sl, take_profit=tp,
                         confidence=decision.get("confidence", 0),
@@ -187,12 +217,12 @@ class TradeExecutor:
                         llm_model=self._get_llm_model(),
                     )
                 except Exception as e:
-                    logger.error(f"[DB] Falha ao registrar abertura no DB (posicao JA aberta na exchange) order_id={order_id}: {e}")
+                    logger.error(f"[{self.symbol}] [DB] Falha ao registrar abertura no DB (posicao JA aberta na exchange) order_id={order_id}: {e}")
                 self.active_trade = {
                     "side": side, "entry": real_entry, "sl": sl, "tp": tp,
                     "qty": qty, "order_id": order_id,
                 }
-                return (f"{action} {qty} BTC @ ${real_entry:,.2f} "
+                return (f"[{self.symbol}] {action} {qty} @ ${real_entry:,.2f} "
                         f"SL=${sl:,.2f} TP=${tp:,.2f}(Limit) "
                         f"OrderID={order_id}")
             else:
@@ -209,7 +239,7 @@ class TradeExecutor:
 
         if cfg.DRY_RUN:
             self.active_trade = None
-            return f"[DRY] Fechando {pos['side']} {pos['size']} BTC"
+            return f"[{self.symbol}] [DRY] Fechando {pos['side']} {pos['size']}"
 
         try:
             close_side = "Sell" if pos["side"] == "Buy" else "Buy"
@@ -217,7 +247,7 @@ class TradeExecutor:
             result = self._api_call(
                 "place_order",
                 category="linear",
-                symbol=cfg.SYMBOL,
+                symbol=self.symbol,
                 side=close_side,
                 orderType="Market",
                 qty=str(pos["size"]),
@@ -272,7 +302,7 @@ class TradeExecutor:
             result = self._api_call(
                 "set_trading_stop",
                 category="linear",
-                symbol=cfg.SYMBOL,
+                symbol=self.symbol,
                 stopLoss=sl_str,
                 slTriggerBy="LastPrice",
                 takeProfit=tp_str,
@@ -295,7 +325,7 @@ class TradeExecutor:
             result = self._api_call(
                 "set_trading_stop",
                 category="linear",
-                symbol=cfg.SYMBOL,
+                symbol=self.symbol,
                 stopLoss=sl_str,
                 slTriggerBy="LastPrice",
                 takeProfit=tp_str,
@@ -315,7 +345,7 @@ class TradeExecutor:
             time.sleep(0.5)  # Aguarda fill propagar
             result = self._api_call(
                 "get_executions",
-                category="linear", symbol=cfg.SYMBOL, orderId=order_id, limit=1,
+                category="linear", symbol=self.symbol, orderId=order_id, limit=1,
             )
             executions = result.get("result", {}).get("list", [])
             if executions:
@@ -337,7 +367,7 @@ class TradeExecutor:
         """Retorna posicao aberta."""
         result = self._api_call(
             "get_positions",
-            category="linear", symbol=cfg.SYMBOL
+            category="linear", symbol=self.symbol
         )
         for p in result["result"]["list"]:
             if float(p["size"]) > 0:
@@ -391,7 +421,7 @@ class TradeExecutor:
             # Buscar nas ordens do bot para encontrar o fechamento correto
             orders = self._api_call(
                 "get_order_history",
-                category="linear", symbol=cfg.SYMBOL, limit=20,
+                category="linear", symbol=self.symbol, limit=20,
             )
 
             # Encontrar a ordem de TP ou SL que foi Filled
@@ -408,14 +438,14 @@ class TradeExecutor:
             # Nota: orderId no closed_pnl e da ordem de FECHAMENTO, nao de abertura
             closed = self._api_call(
                 "get_closed_pnl",
-                category="linear", symbol=cfg.SYMBOL, limit=5,
+                category="linear", symbol=self.symbol, limit=5,
             )
             matched = None
             if closed["result"]["list"]:
                 matched = closed["result"]["list"][0]  # mais recente
 
             if not matched:
-                raise RuntimeError(f"closed_pnl vazio para {cfg.SYMBOL}")
+                raise RuntimeError(f"closed_pnl vazio para {self.symbol}")
 
             exit_price = float(matched["avgExitPrice"])
             pnl = float(matched["closedPnl"])

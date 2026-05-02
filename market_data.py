@@ -19,9 +19,10 @@ RETRY_DELAY = 2
 
 
 class MarketData:
-    """Coleta e formata dados de mercado."""
+    """Coleta e formata dados de mercado para um simbolo especifico."""
 
-    def __init__(self):
+    def __init__(self, symbol: str = None):
+        self.symbol = symbol or cfg.SYMBOL
         self.client = self._create_client()
 
     def _create_client(self) -> HTTP:
@@ -53,7 +54,7 @@ class MarketData:
         limit = limit or cfg.KLINES_TO_SEND
         result = self._api_call(
             "get_kline",
-            category="linear", symbol=cfg.SYMBOL,
+            category="linear", symbol=self.symbol,
             interval=interval, limit=limit
         )
         if not result or result.get("retCode") != 0:
@@ -155,7 +156,7 @@ class MarketData:
         """Retorna posicao aberta ou None."""
         result = self._api_call(
             "get_positions",
-            category="linear", symbol=cfg.SYMBOL
+            category="linear", symbol=self.symbol
         )
         if not result or result.get("retCode") != 0:
             msg = result.get("retMsg", "unknown") if result else "sem resposta"
@@ -193,13 +194,13 @@ class MarketData:
         # 15min klines (24h)
         df = self.get_klines(cfg.TIMEFRAME, cfg.KLINES_TO_SEND)
         if df.empty:
-            raise ValueError(f"Nenhum dado de klines recebido para {cfg.SYMBOL} ({cfg.TIMEFRAME})")
+            raise ValueError(f"Nenhum dado de klines recebido para {self.symbol} ({cfg.TIMEFRAME})")
         ind = self.calc_indicators(df)
 
         # Daily klines (30 dias)
         df_daily = self.get_klines("D", cfg.DAILY_KLINES)
         if df_daily.empty:
-            raise ValueError(f"Nenhum dado de klines diarios recebido para {cfg.SYMBOL}")
+            raise ValueError(f"Nenhum dado de klines diarios recebido para {self.symbol}")
 
         # Current state
         price = df["close"].iloc[-1]
@@ -208,13 +209,13 @@ class MarketData:
 
         # Build text
         lines = []
-        lines.append(f"=== MARKET DATA — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} ===")
-        lines.append(f"Symbol: {cfg.SYMBOL} | Price: ${price:,.2f} | Balance: ${balance:,.2f}")
+        lines.append(f"=== MARKET DATA ({self.symbol}) — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} ===")
+        lines.append(f"Symbol: {self.symbol} | Price: ${price:,.2f} | Balance: ${balance:,.2f}")
         lines.append("")
 
         # Position
         if position:
-            lines.append(f"POSICAO ABERTA: {position['side']} {position['size']} BTC")
+            lines.append(f"POSICAO ABERTA: {position['side']} {position['size']} {self.symbol}")
             lines.append(f"  Entry: ${position['entry']:,.2f} | PnL: ${position['pnl']:.4f}")
             if position['sl'] is not None and position['tp'] is not None:
                 lines.append(f"  SL: ${position['sl']:,.2f} | TP: ${position['tp']:,.2f}")

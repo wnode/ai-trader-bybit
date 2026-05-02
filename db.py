@@ -13,7 +13,7 @@ DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(DB_DIR, "trades.db")
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _connect() -> sqlite3.Connection:
@@ -38,6 +38,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 opened_at TEXT NOT NULL,
                 closed_at TEXT,
+                symbol TEXT NOT NULL DEFAULT 'BTCUSDT',
                 side TEXT NOT NULL,
                 qty REAL NOT NULL,
                 entry_price REAL NOT NULL,
@@ -54,10 +55,18 @@ def init_db():
             )
         """)
         row = conn.execute("SELECT version FROM schema_version").fetchone()
+        current_version = row[0] if row else 0
+
+        # Migracao v1 -> v2: adicionar coluna symbol
+        if current_version < 2:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()]
+            if "symbol" not in cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN symbol TEXT NOT NULL DEFAULT 'BTCUSDT'")
+                logger.info("[DB] Migracao v2: coluna 'symbol' adicionada (default BTCUSDT para trades existentes)")
+
         if not row:
             conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
-        elif row[0] < SCHEMA_VERSION:
-            # Migracoes futuras aqui
+        elif current_version < SCHEMA_VERSION:
             conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
         conn.commit()
     finally:
@@ -65,7 +74,7 @@ def init_db():
     logger.info(f"[DB] Banco inicializado (v{SCHEMA_VERSION}): {DB_PATH}")
 
 
-def record_open(side: str, qty: float, entry_price: float,
+def record_open(symbol: str, side: str, qty: float, entry_price: float,
                 stop_loss: float, take_profit: float,
                 confidence: float, reason: str, order_id: str,
                 llm_provider: str = "", llm_model: str = "") -> int:
@@ -73,19 +82,19 @@ def record_open(side: str, qty: float, entry_price: float,
     conn = _connect()
     try:
         cursor = conn.execute("""
-            INSERT INTO trades (opened_at, side, qty, entry_price, stop_loss, take_profit,
+            INSERT INTO trades (opened_at, symbol, side, qty, entry_price, stop_loss, take_profit,
                                 confidence, reason, order_id, llm_provider, llm_model)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.now(timezone.utc).isoformat(),
-            side, qty, entry_price, stop_loss, take_profit,
+            symbol, side, qty, entry_price, stop_loss, take_profit,
             confidence, reason, order_id, llm_provider, llm_model,
         ))
         trade_id = cursor.lastrowid
         conn.commit()
     finally:
         conn.close()
-    logger.info(f"[DB] Trade #{trade_id} aberto: {side} {qty} BTC @ ${entry_price:,.2f}")
+    logger.info(f"[DB] Trade #{trade_id} aberto: {symbol} {side} {qty} @ ${entry_price:,.2f}")
     return trade_id
 
 
@@ -113,40 +122,55 @@ def record_close(order_id: str, exit_price: float, pnl: float, close_type: str) 
     return updated
 
 
-def get_all_trades() -> list[dict]:
-    """Retorna todos os trades fechados, do mais antigo ao mais recente."""
+def get_all_trades(symbol: str | None = None) -> list[dict]:
+    """Retorna todos os trades fechados, do mais antigo ao mais recente.
+    Se symbol for fornecido, filtra por simbolo."""
     conn = _connect()
     try:
-        rows = conn.execute("""
-            SELECT * FROM trades WHERE closed_at IS NOT NULL
-            ORDER BY opened_at ASC
-        """).fetchall()
+        if symbol:
+            rows = conn.execute("""
+                SELECT * FROM trades WHERE closed_at IS NOT NULL AND symbol = ?
+                ORDER BY opened_at ASC
+            """, (symbol,)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM trades WHERE closed_at IS NOT NULL
+                ORDER BY opened_at ASC
+            """).fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
 
 
-def get_open_trade() -> dict | None:
-    """Retorna trade aberto (sem closed_at), se houver."""
+def get_open_trade(symbol: str | None = None) -> dict | None:
+    """Retorna trade aberto (sem closed_at), se houver.
+    Se symbol for fornecido, filtra por simbolo."""
     conn = _connect()
     try:
-        rows = conn.execute("""
-            SELECT * FROM trades WHERE closed_at IS NULL
-            ORDER BY opened_at DESC
-        """).fetchall()
+        if symbol:
+            rows = conn.execute("""
+                SELECT * FROM trades WHERE closed_at IS NULL AND symbol = ?
+                ORDER BY opened_at DESC
+            """, (symbol,)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM trades WHERE closed_at IS NULL
+                ORDER BY opened_at DESC
+            """).fetchall()
     finally:
         conn.close()
 
     if not rows:
         return None
     if len(rows) > 1:
-        logger.warning(f"[DB] {len(rows)} trades abertos encontrados — usando o mais recente")
+        logger.warning(f"[DB] {len(rows)} trades abertos encontrados (symbol={symbol or 'todos'}) — usando o mais recente")
     return dict(rows[0])
 
 
-def get_stats() -> dict:
-    """Calcula estatisticas dos trades fechados."""
-    trades = get_all_trades()
+def get_stats(symbol: str | None = None) -> dict:
+    """Calcula estatisticas dos trades fechados.
+    Se symbol for fornecido, filtra por simbolo."""
+    trades = get_all_trades(symbol)
     if not trades:
         return {}
 

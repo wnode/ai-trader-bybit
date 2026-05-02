@@ -42,7 +42,20 @@ USE_TESTNET = _get_bool("USE_TESTNET", "true")
 DRY_RUN = _get_bool("DRY_RUN", "true")
 
 # Trading
-SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
+# SYMBOLS: lista separada por virgula (ex: BTCUSDT,ETHUSDT,SOLUSDT)
+# SYMBOL (legado): se SYMBOLS nao definido, usa SYMBOL como unico simbolo
+_symbols_env = os.getenv("SYMBOLS", "").strip()
+if _symbols_env:
+    SYMBOLS = [s.strip().upper() for s in _symbols_env.split(",") if s.strip()]
+else:
+    SYMBOLS = [os.getenv("SYMBOL", "BTCUSDT").strip().upper()]
+SYMBOL = SYMBOLS[0]  # Mantem compat com codigo que ainda le cfg.SYMBOL direto
+
+for _s in SYMBOLS:
+    if not _s.endswith("USDT"):
+        print(f"[CONFIG] ERRO: simbolo deve terminar em USDT (valor: '{_s}')")
+        sys.exit(1)
+
 TIMEFRAME = os.getenv("TIMEFRAME", "15")
 VALID_TIMEFRAMES = ("1", "3", "5", "15", "30", "60", "120", "240", "360", "720", "D", "W", "M")
 if TIMEFRAME not in VALID_TIMEFRAMES:
