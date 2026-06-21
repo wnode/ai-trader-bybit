@@ -14,9 +14,44 @@ import config as cfg
 logger = logging.getLogger(__name__)
 
 
-def _build_system_prompt() -> str:
-    """Constroi system prompt com valores da config."""
-    return f"""Voce e um trader profissional de Bitcoin Futures ({cfg.SYMBOL} perpetual) na Bybit.
+def _symbol_label(symbol: str) -> str:
+    """Retorna nome legivel do ativo a partir do simbolo (ex: BTCUSDT -> Bitcoin)."""
+    base = symbol.replace("USDT", "").upper()
+    labels = {
+        "BTC": "Bitcoin",
+        "ETH": "Ethereum",
+        "SOL": "Solana",
+        "XRP": "XRP",
+        "ADA": "Cardano",
+        "DOGE": "Dogecoin",
+        "BNB": "BNB",
+    }
+    return labels.get(base, base)
+
+
+def _build_system_prompt(symbol: str = None) -> str:
+    """Constroi system prompt com valores da config para um simbolo especifico."""
+    sym = symbol or cfg.SYMBOL
+    asset = _symbol_label(sym)
+    if cfg.PARTIAL_TP_ENABLED:
+        tp_section = (
+            f"4. Take Profit (gerido AUTOMATICAMENTE pelo sistema — voce so informa o nivel do runner):\n"
+            f"   - O sistema usa estrategia de RISCO:RETORNO ALTO com saida parcial:\n"
+            f"     * fecha {cfg.TP1_SIZE_PCT:.0%} da posicao no TP1 = {cfg.TP1_RR_RATIO}:1 (trava lucro)\n"
+            f"     * deixa o restante correr ate o runner = {cfg.MIN_RR_RATIO}:1\n"
+            f"     * apos o TP1, o SL e movido para breakeven (runner vira risco zero)\n"
+            f"   - Informe take_profit no nivel do runner ({cfg.MIN_RR_RATIO}x a distancia do SL)\n"
+            f"   - So entre se houver espaco tecnico REALISTA ate {cfg.MIN_RR_RATIO}:1 "
+            f"(resistencia/suporte distante o suficiente)"
+        )
+    else:
+        tp_section = (
+            f"4. Take Profit: risco/retorno minimo de {cfg.MIN_RR_RATIO}:1 "
+            f"(distancia TP >= {cfg.MIN_RR_RATIO}x distancia SL)\n"
+            f"   - Posicione o TP em nivel tecnico (resistencia para LONG, suporte para SHORT)\n"
+            f"   - Bollinger Band oposta e uma boa referencia"
+        )
+    return f"""Voce e um trader profissional de {asset} Futures ({sym} perpetual) na Bybit.
 Voce opera com alavancagem {cfg.LEVERAGE}x em timeframe de {cfg.TIMEFRAME} minutos.
 
 === FRAMEWORK DE DECISAO ===
@@ -26,7 +61,7 @@ Para ABRIR posicao, exija CONFLUENCIA DE NO MINIMO 3 dos 5 sinais abaixo:
 1. TENDENCIA (EMAs):
    - LONG: EMA{cfg.EMA_FAST} > EMA{cfg.EMA_MID} > EMA{cfg.EMA_SLOW} (alinhamento bullish)
    - SHORT: EMA{cfg.EMA_FAST} < EMA{cfg.EMA_MID} < EMA{cfg.EMA_SLOW} (alinhamento bearish)
-   - NEUTRO: EMAs entrelagadas = sem tendencia clara
+   - NEUTRO: EMAs entrelacadas = sem tendencia clara
 
 2. MOMENTUM (RSI):
    - LONG: RSI entre 40-65 (momentum saudavel, nao sobrecomprado)
@@ -37,15 +72,15 @@ Para ABRIR posicao, exija CONFLUENCIA DE NO MINIMO 3 dos 5 sinais abaixo:
 3. MOMENTUM (MACD):
    - LONG: Histograma MACD positivo E crescente (valor atual > anterior)
    - SHORT: Histograma MACD negativo E decrescente (valor atual < anterior)
-   - Cruzamento recente da signal line reforga o sinal
+   - Cruzamento recente da signal line reforca o sinal
 
 4. VOLUME:
    - Volume do candle atual > 1.2x a media de volume ({cfg.VOL_AVG_PERIOD} periodos)
    - Volume fraco (<0.8x media) = sinal fraco, reduz confianca
 
 5. BOLLINGER BANDS:
-   - LONG: Preco acima da banda media E abaixo da superior (espago para subir)
-   - SHORT: Preco abaixo da banda media E acima da inferior (espago para cair)
+   - LONG: Preco acima da banda media E abaixo da superior (espaco para subir)
+   - SHORT: Preco abaixo da banda media E acima da inferior (espaco para cair)
    - Preco colado na banda = nao entrar nessa direcao
 
 === FILTROS DE BLOQUEIO (qualquer um impede abertura) ===
@@ -59,14 +94,19 @@ Para ABRIR posicao, exija CONFLUENCIA DE NO MINIMO 3 dos 5 sinais abaixo:
 === REGRAS DE ENTRADA (LONG/SHORT) ===
 
 1. Exija no minimo 3 confluencias dos 5 sinais acima
+   - OBRIGATORIO: pelo menos 1 sinal de MOMENTUM (MACD ou Volume) deve estar presente
+   - Trend + RSI + Bollinger sozinhos NAO sao suficientes — falta confirmacao de forca
+   - Se MACD e Volume estiverem ambos ausentes, retorne HOLD mesmo com 3 confluencias
 2. Entry = preco atual de mercado (sera executado como Market order)
 3. Stop Loss: entre {cfg.SL_MIN_PCT}% e {cfg.SL_MAX_PCT}% do preco de entrada
-   - Posicione o SL em nivel tecnico (abaixo de suporte para LONG, acima de resistencia para SHORT)
-   - Use ATR como referencia: SL = 1.2 x ATR e um bom ponto de partida
-   - Se 1.2 x ATR cair fora da faixa {cfg.SL_MIN_PCT}%-{cfg.SL_MAX_PCT}%, ajuste para ficar dentro
-4. Take Profit: risco/retorno minimo de {cfg.MIN_RR_RATIO}:1 (distancia TP >= {cfg.MIN_RR_RATIO}x distancia SL)
-   - Posicione o TP em nivel tecnico (resistencia para LONG, suporte para SHORT)
-   - Bollinger Band oposta e uma boa referencia
+   - Posicione o SL ALEM do nivel tecnico, NAO exatamente em cima
+   - LONG: SL deve ficar 0.1-0.2% ABAIXO do suporte (nao no suporte exato)
+   - SHORT: SL deve ficar 0.1-0.2% ACIMA da resistencia (nao na resistencia exata)
+   - Por que: stop hunting — market makers caçam stops em niveis obvios
+   - Use ATR como referencia: SL = 1.5 x ATR (era 1.2x, aumentado para dar mais espaco)
+   - Se 1.5 x ATR cair fora da faixa {cfg.SL_MIN_PCT}%-{cfg.SL_MAX_PCT}%, ajuste para ficar dentro
+   - Evite SLs em niveis psicologicos redondos (ex: \$78,000 exato) — coloque \$77,940
+{tp_section}
 
 === REGRAS PARA POSICAO ABERTA (MUITO IMPORTANTE) ===
 
@@ -80,6 +120,49 @@ CLOSE so em situacoes EXCEPCIONAIS:
 - Reversao CONFIRMADA: pelo menos 3 indicadores mudaram de direcao (EMA cruzou contra + MACD cruzou contra + RSI saiu de zona extrema)
 - Volume anormal: >3x a media CONTRA sua posicao
 - Invalidacao total: a tese que motivou a entrada nao e mais valida por multiplos fatores
+
+=== ANALISE DE NIVEIS DE SUPORTE E RESISTENCIA ===
+
+Antes de abrir, IDENTIFIQUE niveis-chave nos candles fornecidos:
+- RESISTENCIA: zona onde o preco subiu, foi rejeitado e voltou (testada 2+ vezes)
+- SUPORTE: zona onde o preco caiu, foi defendido e subiu (testada 2+ vezes)
+- Use os candles de 15min (ultimas 24h) e diarios para identificar esses niveis
+
+Regras de entrada com S/R:
+- NAO abra LONG perto de uma RESISTENCIA testada 2+ vezes (espere o preco romper com volume)
+- NAO abra SHORT perto de um SUPORTE testado 2+ vezes (espere o preco romper com volume)
+- "Perto" = dentro de 0.3% do nivel
+- Idealmente: LONG perto de suporte (com confluencia) ou apos romper resistencia
+- Idealmente: SHORT perto de resistencia (com confluencia) ou apos romper suporte
+- Se o preco esta no MEIO de um range S/R, e zona de baixa probabilidade — exija mais confluencia
+
+=== REGRA ANTI-REPETICAO (MUITO IMPORTANTE) ===
+
+Use o HISTORICO RECENTE DE DECISOES para evitar repetir erros:
+- Se 2 dos ultimos 3 trades na MESMA DIRECAO foram SL, NAO abra na mesma direcao a menos que:
+  - Tenha 4+ confluencias (nao 3)
+  - O preco rompeu CLARAMENTE o nivel de resistencia/suporte que falhou antes
+  - O contexto mudou (ex: nova tendencia diaria, breakout de volume)
+- 3 SLs na mesma direcao = mercado esta dizendo que nao vai naquela direcao agora
+- Se o ultimo trade foi SL, espere pelo menos 1 candle de 15min antes de operar de novo
+- Insistir na mesma tese que ja falhou = revenge trading = perda garantida
+
+=== REGRA ANTI-ANTECIPACAO (MUITO IMPORTANTE) ===
+
+NAO tente pegar fundos ou topos sem confirmacao. Mas tambem nao espere TARDE demais.
+- NAO abra LONG so porque "ja caiu o suficiente" ou Fear extremo (sem confirmacao tecnica)
+- NAO abra SHORT so porque "ja subiu o suficiente" ou Greed extremo (sem confirmacao tecnica)
+
+Para entrar CONTRA a tendencia atual (reversao), exija TODAS estas condicoes:
+1. MACD ja virou na sua direcao (histograma cruzou zero ou esta virando)
+2. Volume forte no candle de reversao (>1.2x media)
+3. Preco fez minima/maxima local + 2 candles consecutivos confirmando a reversao
+4. RSI saiu de zona extrema (acima de 30 para reversao alta, abaixo de 70 para reversao baixa)
+
+Se essas 4 condicoes estao presentes, NAO espere as EMAs cruzarem — quando isso acontece,
+metade do movimento ja foi. Entre com confirmacao de momentum, nao com confirmacao de tendencia.
+
+Sentimento extremo (Fear/Greed) ISOLADO nao e motivo para entrar — exija a confirmacao tecnica acima.
 
 === FORMATO DE RESPOSTA (JSON) ===
 
@@ -105,13 +188,30 @@ Regras do JSON:
 - Se CLOSE: liste QUAIS indicadores confirmam a reversao
 - Confianca minima para operar: {cfg.MIN_CONFIDENCE} (abaixo disso, retorne HOLD)
 
+=== CONTEXTO DE SENTIMENTO (se disponivel) ===
+
+Se dados de sentimento forem fornecidos (Fear & Greed Index, noticias, posts do X):
+- Use como CONTEXTO adicional, NAO como sinal primario
+- Fear & Greed 0-24 (Extreme Fear): mercado em panico (extremo), possivel oportunidade contrarian para LONG
+- Fear & Greed 25-49 (Fear): sentimento negativo, cautela
+- Fear & Greed 50 (Neutro): indecisao
+- Fear & Greed 51-74 (Greed): sentimento positivo, mercado otimista
+- Fear & Greed 75-100 (Extreme Greed): euforia, possivel oportunidade contrarian para SHORT
+- Sentimento extremo CONTRA sua direcao = reduz confianca em 0.1
+- Sentimento extremo A FAVOR (contrarian) = pode reforcar a tese
+- NAO abra trades baseado APENAS em sentimento — exija confluencia tecnica
+
 === CALIBRACAO DE CONFIANCA ===
 
 - 0.9-1.0: 5 confluencias + volume forte + tendencia diaria alinhada
-- 0.8-0.9: 4 confluencias + sem filtro bloqueando
-- 0.7-0.8: 3 confluencias claras
-- 0.5-0.7: 2 confluencias ou sinais ambiguos = HOLD
+- 0.8-0.9: 4 confluencias COM momentum (MACD ou Volume) + sem filtro bloqueando
+- 0.7-0.8: 3 confluencias COM momentum obrigatorio (MACD ou Volume presente)
+- 0.5-0.7: 3 confluencias SEM momentum, ou 2 confluencias = HOLD
 - <0.5: setup fraco ou conflitante = HOLD obrigatorio
+
+IMPORTANTE: Confianca minima para operar e {cfg.MIN_CONFIDENCE}.
+Se 3 confluencias incluem MACD ou Volume = pode chegar a 0.8.
+Se 3 confluencias SEM momentum = max 0.6 (vira HOLD).
 
 === REGRA DE OURO ===
 
@@ -135,20 +235,20 @@ def create_analyst() -> "BaseAnalyst":
 
 
 class BaseAnalyst:
-    """Base class para todos os analysts."""
+    """Base class para todos os analysts. Historico mantido por simbolo."""
 
     def __init__(self, provider_name: str, model: str):
         self.provider_name = provider_name
         self.model = model
-        self.trade_history: list[dict] = []
+        self.trade_history: dict[str, list[dict]] = {}
 
-    def analyze(self, market_data: str) -> dict:
-        """Envia dados a LLM e retorna decisao."""
-        user_msg = market_data + self._history_text()
+    def analyze(self, market_data: str, symbol: str = None) -> dict:
+        """Envia dados a LLM e retorna decisao. Historico por simbolo."""
+        user_msg = market_data + self._history_text(symbol)
         text = None
 
         try:
-            text, input_tokens, output_tokens = self._call_llm(user_msg)
+            text, input_tokens, output_tokens = self._call_llm(user_msg, symbol=symbol)
 
             # Extrai JSON da resposta
             if "```json" in text:
@@ -253,15 +353,18 @@ class BaseAnalyst:
                 return result
             raise
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         """Chama a LLM. Retorna (text, input_tokens, output_tokens). Override nos filhos."""
         raise NotImplementedError
 
-    def _history_text(self) -> str:
-        if not self.trade_history:
+    def _history_text(self, symbol: str = None) -> str:
+        key = symbol or "_default"
+        history = self.trade_history.get(key, [])
+        if not history:
             return ""
-        recent = self.trade_history[-10:]
-        lines = ["\n\n=== HISTORICO RECENTE DE DECISOES ==="]
+        recent = history[-10:]
+        header = f"\n\n=== HISTORICO RECENTE DE DECISOES ({symbol}) ===" if symbol else "\n\n=== HISTORICO RECENTE DE DECISOES ==="
+        lines = [header]
         for h in recent:
             conf = h.get('confidence', 0)
             try:
@@ -274,8 +377,11 @@ class BaseAnalyst:
                 lines.append(f"    -> Resultado: {h['result']}")
         return "\n".join(lines)
 
-    def record_decision(self, decision: dict, timestamp: str, result: str = None):
-        self.trade_history.append({
+    def record_decision(self, decision: dict, timestamp: str, result: str = None, symbol: str = None):
+        key = symbol or "_default"
+        if key not in self.trade_history:
+            self.trade_history[key] = []
+        self.trade_history[key].append({
             "time": timestamp,
             "action": decision["action"],
             "confidence": decision.get("confidence", 0),
@@ -283,8 +389,8 @@ class BaseAnalyst:
             "reason": decision.get("reason", ""),
             "result": result,
         })
-        if len(self.trade_history) > 50:
-            self.trade_history = self.trade_history[-50:]
+        if len(self.trade_history[key]) > 50:
+            self.trade_history[key] = self.trade_history[key][-50:]
 
 
 class AnthropicAnalyst(BaseAnalyst):
@@ -295,12 +401,12 @@ class AnthropicAnalyst(BaseAnalyst):
         import anthropic
         self.client = anthropic.Anthropic(api_key=cfg.ANTHROPIC_API_KEY)
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         response = self.client.messages.create(
             model=self.model,
             max_tokens=1024,
             temperature=0.1,  # Baixa temperatura para consistencia
-            system=_build_system_prompt(),
+            system=_build_system_prompt(symbol),
             messages=[{"role": "user", "content": user_msg}]
         )
         if not response.content:
@@ -317,14 +423,14 @@ class GoogleAnalyst(BaseAnalyst):
         from google import genai
         self.client = genai.Client(api_key=cfg.GOOGLE_API_KEY)
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         from google.genai import types
 
         response = self.client.models.generate_content(
             model=self.model,
             contents=user_msg,
             config=types.GenerateContentConfig(
-                system_instruction=_build_system_prompt(),
+                system_instruction=_build_system_prompt(symbol),
                 max_output_tokens=2048,
                 temperature=0.1,  # Baixa temperatura para consistencia
                 response_mime_type="application/json",
@@ -347,13 +453,13 @@ class OpenAIAnalyst(BaseAnalyst):
         from openai import OpenAI
         self.client = OpenAI(api_key=cfg.OPENAI_API_KEY)
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=1024,
             temperature=0.1,  # Baixa temperatura para consistencia
             messages=[
-                {"role": "system", "content": _build_system_prompt()},
+                {"role": "system", "content": _build_system_prompt(symbol)},
                 {"role": "user", "content": user_msg},
             ]
         )
@@ -366,23 +472,38 @@ class OpenAIAnalyst(BaseAnalyst):
 
 
 class XAIAnalyst(BaseAnalyst):
-    """xAI Grok."""
+    """xAI Grok — suporta x_search e web_search para sentimento em tempo real.
+    Search e cacheado por N iteracoes para economizar creditos.
+    Monitor de sentimento detecta mudancas bruscas e forca analise."""
 
     def __init__(self):
+        self.use_search = cfg.XAI_SEARCH
         super().__init__("GROK", cfg.XAI_MODEL)
         from openai import OpenAI
         self.client = OpenAI(
             api_key=cfg.XAI_API_KEY,
             base_url="https://api.x.ai/v1",
         )
+        self._search_cache: str | None = None
+        self._search_iter_count: int = 0
+        self._last_urgency: int = 0
+        self.sentiment_alert: bool = False
 
-    def _call_llm(self, user_msg: str) -> tuple[str, int, int]:
+    def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
+        if self.use_search:
+            self._maybe_refresh_search()
+        if self._search_cache:
+            user_msg = self._search_cache + "\n\n" + user_msg
+        return self._call_chat(user_msg, symbol)
+
+    def _call_chat(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
+        """Chat completions (usado em todas as iteracoes)."""
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=1024,
             temperature=0.1,
             messages=[
-                {"role": "system", "content": _build_system_prompt()},
+                {"role": "system", "content": _build_system_prompt(symbol)},
                 {"role": "user", "content": user_msg},
             ]
         )
@@ -392,3 +513,115 @@ class XAIAnalyst(BaseAnalyst):
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
         return text, input_tokens, output_tokens
+
+    def _maybe_refresh_search(self):
+        """Atualiza cache de sentimento do X a cada N iteracoes."""
+        self._search_iter_count += 1
+        cache_every = cfg.XAI_SEARCH_CACHE_ITERATIONS
+        if self._search_cache and self._search_iter_count < cache_every:
+            logger.info(f"[GROK] Usando sentimento cacheado ({self._search_iter_count}/{cache_every})")
+            return
+        self._search_iter_count = 0
+        self._do_search()
+
+    def _do_search(self):
+        """Executa busca de sentimento e atualiza cache."""
+        try:
+            text, urgency = self._fetch_sentiment()
+            self._search_cache = text
+            self._last_urgency = urgency
+            self.sentiment_alert = False
+            logger.info(f"[GROK] Sentimento atualizado (urgencia={urgency}/10)")
+        except Exception as e:
+            logger.warning(f"[GROK] Erro ao buscar sentimento: {e}")
+
+    def check_sentiment_shift(self) -> bool:
+        """Checa se houve mudanca brusca no sentimento. Chamado durante o sleep."""
+        if not self.use_search:
+            return False
+        try:
+            _, urgency = self._fetch_sentiment()
+            diff = abs(urgency - self._last_urgency)
+            if diff >= 3 or urgency >= 8:
+                logger.info(f"[ALERT] Mudanca de sentimento detectada! "
+                            f"urgencia: {self._last_urgency} -> {urgency} (diff={diff})")
+                self._last_urgency = urgency
+                self.sentiment_alert = True
+                self._search_iter_count = 0
+                return True
+            logger.info(f"[MONITOR] Sentimento estavel (urgencia={urgency}/10, diff={diff})")
+            return False
+        except Exception as e:
+            logger.warning(f"[MONITOR] Erro ao checar sentimento: {e}")
+            return False
+
+    def _fetch_sentiment(self) -> tuple[str, int]:
+        """Busca sentimento via Responses API. Retorna (texto, urgencia 1-10)."""
+        import requests as req
+
+        # Lista de ativos relevantes a partir dos simbolos configurados
+        assets = ", ".join(_symbol_label(s) for s in cfg.SYMBOLS)
+
+        payload = {
+            "model": cfg.XAI_SEARCH_MODEL,
+            "instructions": (
+                "Voce e um analista de sentimento de mercado crypto. "
+                "Responda em JSON com dois campos:\n"
+                "1) \"summary\": resumo conciso (max 5 frases) do sentimento atual no mercado crypto\n"
+                "2) \"urgency\": numero de 1 a 10 indicando urgencia para traders:\n"
+                "   1-3 = mercado calmo, sem noticias relevantes\n"
+                "   4-6 = noticias moderadas, sentimento mudando\n"
+                "   7-8 = noticia importante (regulacao, hack, grande movimentacao)\n"
+                "   9-10 = evento critico (crash, ban, black swan)\n"
+                "Responda APENAS o JSON, sem markdown."
+            ),
+            "input": (
+                f"Busque informacoes recentes sobre o mercado crypto, com foco em: {assets}. "
+                "1) Sentimento atual no X (Twitter) sobre esses ativos — bullish ou bearish? "
+                "2) Noticias recentes que podem impactar os precos. "
+                "3) Algum evento critico acontecendo agora? "
+                "Resuma tudo de forma concisa para um trader."
+            ),
+            "tools": [
+                {"type": "x_search"},
+                {"type": "web_search"},
+            ],
+            "temperature": 0.1,
+            "max_output_tokens": 512,
+        }
+
+        headers = {
+            "Authorization": f"Bearer {cfg.XAI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        resp = req.post(
+            f"https://api.x.ai/v1/responses",
+            json=payload,
+            headers=headers,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        text = ""
+        for item in data.get("output", []):
+            if item.get("type") == "message":
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        text += content.get("text", "")
+
+        if not text:
+            raise ValueError("Resposta vazia da API xAI Responses")
+
+        text = text.strip()
+        urgency = 3
+        try:
+            parsed = json.loads(text)
+            summary = parsed.get("summary", text)
+            urgency = max(1, min(10, int(parsed.get("urgency", 3))))
+            text = summary
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        return "=== SENTIMENTO DO X (TWITTER) ===\n" + text, urgency

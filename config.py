@@ -1,6 +1,6 @@
 """
 Configuracao do AI Trader Bot.
-Suporta multiplos providers: anthropic, google, openai
+Suporta multiplos providers: anthropic, google, openai, xai
 """
 import os
 import sys
@@ -42,7 +42,20 @@ USE_TESTNET = _get_bool("USE_TESTNET", "true")
 DRY_RUN = _get_bool("DRY_RUN", "true")
 
 # Trading
-SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
+# SYMBOLS: lista separada por virgula (ex: BTCUSDT,ETHUSDT,SOLUSDT)
+# SYMBOL (legado): se SYMBOLS nao definido, usa SYMBOL como unico simbolo
+_symbols_env = os.getenv("SYMBOLS", "").strip()
+if _symbols_env:
+    SYMBOLS = [s.strip().upper() for s in _symbols_env.split(",") if s.strip()]
+else:
+    SYMBOLS = [os.getenv("SYMBOL", "BTCUSDT").strip().upper()]
+SYMBOL = SYMBOLS[0]  # Mantem compat com codigo que ainda le cfg.SYMBOL direto
+
+for _s in SYMBOLS:
+    if not _s.endswith("USDT"):
+        print(f"[CONFIG] ERRO: simbolo deve terminar em USDT (valor: '{_s}')")
+        sys.exit(1)
+
 TIMEFRAME = os.getenv("TIMEFRAME", "15")
 VALID_TIMEFRAMES = ("1", "3", "5", "15", "30", "60", "120", "240", "360", "720", "D", "W", "M")
 if TIMEFRAME not in VALID_TIMEFRAMES:
@@ -75,6 +88,30 @@ MIN_RR_RATIO = _get_float("MIN_RR_RATIO", "1.0")
 MIN_CONFIDENCE = _get_float("MIN_CONFIDENCE", "0.7")
 ADX_RANGING_THRESHOLD = _get_float("ADX_RANGING_THRESHOLD", "15")
 
+# Estrategia de Risco:Retorno alto — TP parcial + runner com breakeven
+# Quando ligado: fecha TP1_SIZE_PCT da posicao em TP1_RR_RATIO:1 (trava lucro)
+# e deixa o restante correr ate o runner em MIN_RR_RATIO:1. Apos o TP1,
+# o SL e movido para breakeven (entry + BREAKEVEN_OFFSET_PCT% p/ cobrir fees).
+PARTIAL_TP_ENABLED = _get_bool("PARTIAL_TP_ENABLED", "false")
+TP1_RR_RATIO = _get_float("TP1_RR_RATIO", "1.5")
+TP1_SIZE_PCT = _get_float("TP1_SIZE_PCT", "0.5")
+BREAKEVEN_AFTER_TP1 = _get_bool("BREAKEVEN_AFTER_TP1", "true")
+BREAKEVEN_OFFSET_PCT = _get_float("BREAKEVEN_OFFSET_PCT", "0.05")
+
+if PARTIAL_TP_ENABLED:
+    if not (0.0 < TP1_SIZE_PCT < 1.0):
+        print(f"[CONFIG] ERRO: TP1_SIZE_PCT deve estar entre 0 e 1 (valor: {TP1_SIZE_PCT})")
+        sys.exit(1)
+    if TP1_RR_RATIO >= MIN_RR_RATIO:
+        print(f"[CONFIG] ERRO: TP1_RR_RATIO ({TP1_RR_RATIO}) deve ser menor que "
+              f"MIN_RR_RATIO ({MIN_RR_RATIO}) — TP1 e o alvo parcial, MIN_RR_RATIO e o runner")
+        sys.exit(1)
+
+# Sentimento de mercado
+USE_SENTIMENT = _get_bool("USE_SENTIMENT", "false")
+FNG_CACHE_MINUTES = _get_int("FNG_CACHE_MINUTES", "60")
+XAI_SEARCH = _get_bool("XAI_SEARCH", "false")
+
 # LLM Provider
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").strip().lower()
 
@@ -93,6 +130,17 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # xAI (Grok)
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 XAI_MODEL = os.getenv("XAI_MODEL", "grok-3-mini")
+XAI_SEARCH_MODEL = os.getenv("XAI_SEARCH_MODEL", "grok-4-1-fast-non-reasoning")
+XAI_SEARCH_CACHE_ITERATIONS = _get_int("XAI_SEARCH_CACHE_ITERATIONS", "6")
+
+# Sentimento
+SENTIMENT_MONITOR_INTERVAL = _get_int("SENTIMENT_MONITOR_INTERVAL", "120")
+
+# X API v2 Stream (tempo real)
+X_STREAM_ENABLED = _get_bool("X_STREAM_ENABLED", "false")
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "")
+X_STREAM_KEYWORDS = os.getenv("X_STREAM_KEYWORDS", "bitcoin,btc,crypto,#bitcoin,#btc")
+X_STREAM_URGENCY_THRESHOLD = _get_int("X_STREAM_URGENCY_THRESHOLD", "7")
 
 # Validacoes
 VALID_PROVIDERS = ("google", "anthropic", "openai", "xai")

@@ -28,6 +28,8 @@ from market_data import MarketData
 from analyst import create_analyst
 from executor import TradeExecutor
 from monitor import show_status
+from sentiment import SentimentData
+from stream import StreamAlertManager
 import db
 
 # Logging — console + arquivo
@@ -68,17 +70,18 @@ def _sync_bybit_time():
 
 def print_banner(dry_run: bool, analyst):
     mode = "DRY RUN" if dry_run else "LIVE"
+    symbols_str = ", ".join(cfg.SYMBOLS)
     print(f"""
     +==============================================================+
     |    >>> AI TRADER BOT — LLM-Powered Trading <<<               |
     +--------------------------------------------------------------+
     |  Provider: {analyst.provider_name:<47s}|
     |  Model: {analyst.model:<50s}|
-    |  Symbol: {cfg.SYMBOL:<49s}|
+    |  Symbols: {symbols_str:<48s}|
     |  Mode: {mode:<51s}|
     +--------------------------------------------------------------+
-    |  1. Coleta dados de mercado (klines + indicadores)           |
-    |  2. Envia a LLM para analise                                 |
+    |  1. Coleta dados de cada simbolo (klines + indicadores)      |
+    |  2. Envia a LLM para analise (um por simbolo)                |
     |  3. LLM decide: LONG / SHORT / HOLD / CLOSE                 |
     |  4. Executor abre/fecha posicao na Bybit                     |
     |  5. Repete a cada {cfg.CHECK_INTERVAL}s                                       |
@@ -104,11 +107,36 @@ def main():
 
     # Init components
     db.init_db()
-    market = MarketData()
+    sentiment = SentimentData()
+    stream_mgr = StreamAlertManager()
     analyst = create_analyst()
-    executor = TradeExecutor()
+
+    # Cria um trader (market + executor) por simbolo. Falha de um simbolo
+    # nao impede os outros — apenas e logada.
+    traders = []
+    failed = []
+    for sym in cfg.SYMBOLS:
+        try:
+            traders.append({
+                "symbol": sym,
+                "market": MarketData(sym),
+                "executor": TradeExecutor(sym),
+            })
+        except Exception as e:
+            failed.append(sym)
+            logger.error(f"[INIT] Falha ao inicializar trader {sym}: {e}")
+
+    if not traders:
+        logger.critical("[INIT] Nenhum trader inicializado com sucesso. Encerrando.")
+        sys.exit(1)
+
+    logger.info(f"[INIT] {len(traders)} simbolos OK: {[t['symbol'] for t in traders]}"
+                + (f" | {len(failed)} falharam: {failed}" if failed else ""))
 
     print_banner(dry_run, analyst)
+
+    # Iniciar stream do X (se configurado)
+    stream_mgr.start()
 
     # Handler para SIGTERM (shutdown gracioso)
     def _signal_handler(signum, frame):
@@ -133,35 +161,74 @@ def main():
             print_banner(dry_run, analyst)
             logger.info(f"[ITER {iteration}] {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
-            # 0. Verifica se posicao foi fechada por TP/SL da Bybit
-            executor.check_closed_by_exchange()
+            # Sentimento e stream sao compartilhados entre todos os simbolos
+            # Drena fila do stream PRIMEIRO e limpa imediatamente para evitar
+            # descartar alertas que cheguem durante o processamento dos simbolos
+            sentiment_text = sentiment.format_for_llm()
+            stream_mgr.check_alerts()
+            stream_text = stream_mgr.format_for_llm()
+            if stream_text:
+                stream_mgr.clear_alerts()
 
-            # 1. Coleta dados
-            logger.info("[DATA] Coletando dados de mercado...")
-            market_text = market.format_for_llm()
+            # Conta erros por simbolo para detectar falha sistemica
+            symbol_errors = 0
 
-            # 2. Envia a LLM
-            logger.info(f"[LLM] Analisando com {analyst.provider_name} {analyst.model}...")
-            decision = analyst.analyze(market_text)
+            # Itera por cada simbolo sequencialmente
+            for trader in traders:
+                sym = trader["symbol"]
+                market = trader["market"]
+                executor = trader["executor"]
 
-            # 3. Executa decisao
-            result = executor.execute(decision)
-            logger.info(f"[EXEC] {result}")
+                try:
+                    logger.info(f"[{sym}] === Iniciando ciclo ===")
 
-            # 4. Registra
-            analyst.record_decision(decision, now.strftime("%H:%M"), result)
+                    # 0. Verifica se posicao foi fechada por TP/SL da Bybit
+                    executor.check_closed_by_exchange()
 
-            # Status apos execucao
+                    # 0b. Gestao de TP parcial: move SL p/ breakeven apos TP1
+                    executor.manage_open_position()
+
+                    # 1. Coleta dados do simbolo
+                    logger.info(f"[{sym}] [DATA] Coletando dados de mercado...")
+                    market_text = market.format_for_llm()
+
+                    # 1b. Adiciona sentimento (compartilhado)
+                    if sentiment_text:
+                        market_text += "\n\n" + sentiment_text
+                    if stream_text:
+                        market_text += "\n\n" + stream_text
+
+                    # 2. Envia a LLM com historico do simbolo
+                    logger.info(f"[{sym}] [LLM] Analisando com {analyst.provider_name} {analyst.model}...")
+                    decision = analyst.analyze(market_text, symbol=sym)
+
+                    # 3. Executa decisao
+                    result = executor.execute(decision)
+                    logger.info(f"[{sym}] [EXEC] {result}")
+
+                    # 4. Registra no historico do simbolo
+                    analyst.record_decision(decision, now.strftime("%H:%M"), result, symbol=sym)
+                except Exception as e:
+                    symbol_errors += 1
+                    logger.error(f"[{sym}] [ERROR] Erro no ciclo: {e}", exc_info=True)
+                    # Erro em um simbolo nao para o bot — continua com os outros
+
+            # Se TODOS os simbolos falharam, conta como erro consecutivo do bot
+            if symbol_errors > 0 and symbol_errors == len(traders):
+                raise RuntimeError(f"Todos os {len(traders)} simbolos falharam neste ciclo")
+
+            # Status apos execucao (usa client do primeiro trader para queries de saldo)
             try:
-                show_status(executor.client)
+                show_status(traders[0]["executor"].client)
             except Exception as e:
                 logger.warning(f"[MONITOR] Erro ao exibir status: {e}")
 
-            logger.info(f"[STATS] Iteracao {iteration} completa")
+            logger.info(f"[STATS] Iteracao {iteration} completa ({len(traders)} simbolos)")
             consecutive_errors = 0
 
         except KeyboardInterrupt:
             logger.info("[STOP] Bot parado pelo usuario")
+            stream_mgr.stop()
             break
         except Exception as e:
             consecutive_errors += 1
@@ -177,14 +244,46 @@ def main():
             logger.info("[ONCE] Modo --once, saindo")
             break
 
-        # Sleep — intervalo dinamico: 60s com posicao aberta, CHECK_INTERVAL sem
-        interval = 60 if executor.active_trade else cfg.CHECK_INTERVAL
-        logger.info(f"[SLEEP] Aguardando {interval}s{'  (posicao aberta)' if executor.active_trade else ''}...")
+        # Sleep — intervalo dinamico: 60s se algum trader tem posicao aberta, CHECK_INTERVAL caso contrario
+        # Monitores: stream do X (a cada 1s) + polling xAI (a cada SENTIMENT_MONITOR_INTERVAL)
+        any_open = any(t["executor"].active_trade for t in traders)
+        interval = 60 if any_open else cfg.CHECK_INTERVAL
+        monitor_interval = cfg.SENTIMENT_MONITOR_INTERVAL
+        use_xai_monitor = (hasattr(analyst, 'check_sentiment_shift')
+                           and analyst.use_search
+                           and not any_open
+                           and monitor_interval > 0)
+        use_stream = cfg.X_STREAM_ENABLED
+
+        parts = []
+        if use_stream:
+            parts.append("stream X")
+        if use_xai_monitor:
+            parts.append(f"polling xAI {monitor_interval}s")
+        if parts:
+            logger.info(f"[SLEEP] Aguardando {interval}s (monitorando: {', '.join(parts)})...")
+        else:
+            logger.info(f"[SLEEP] Aguardando {interval}s{'  (posicao aberta)' if any_open else ''}...")
+
         try:
-            for _ in range(interval):
+            elapsed = 0
+            while elapsed < interval:
+                # Stream do X: checa fila a cada segundo (< 1s de delay)
+                if use_stream and stream_mgr.check_alerts():
+                    logger.info("[ALERT] Tweet urgente detectado — forcando analise!")
+                    break
+
+                # Polling xAI: checa sentimento periodicamente
+                if use_xai_monitor and elapsed > 0 and elapsed % monitor_interval == 0:
+                    if analyst.check_sentiment_shift():
+                        logger.info("[ALERT] Mudanca brusca de sentimento — forcando analise!")
+                        break
+
                 time.sleep(1)
+                elapsed += 1
         except KeyboardInterrupt:
             logger.info("[STOP] Bot parado pelo usuario")
+            stream_mgr.stop()
             break
 
 
