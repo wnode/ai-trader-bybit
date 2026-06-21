@@ -33,6 +33,7 @@ Tudo via `.env` (ver `.env.example`). Variáveis principais:
 - `CHECK_INTERVAL` — segundos entre ciclos completos (todos os símbolos, default 300)
 - Indicadores: `RSI_PERIOD`, `EMA_FAST/MID/SLOW`, `BB_PERIOD/STD`, `ADX_PERIOD`, `ATR_PERIOD`, `MACD_FAST/SLOW/SIGNAL`
 - Regras de trading: `SL_MIN_PCT`, `SL_MAX_PCT`, `MIN_RR_RATIO`, `MIN_CONFIDENCE`, `ADX_RANGING_THRESHOLD`
+- Risco:Retorno alto (TP parcial + runner): `PARTIAL_TP_ENABLED`, `TP1_RR_RATIO`, `TP1_SIZE_PCT`, `BREAKEVEN_AFTER_TP1`, `BREAKEVEN_OFFSET_PCT`
 
 ## Convenções
 
@@ -40,6 +41,7 @@ Tudo via `.env` (ver `.env.example`). Variáveis principais:
 - Logs vão para console + `logs/bot.log`
 - Todos os módulos usam `import config as cfg` (não `from config import ...`) para que `--live` funcione
 - TP/SL são definidos pela LLM e enviados à Bybit, que executa automaticamente
+- Com `PARTIAL_TP_ENABLED`: TP runner em `MIN_RR_RATIO:1`. Abre fecha `TP1_SIZE_PCT` em `TP1_RR_RATIO:1` (reduceOnly Limit) e deixa o resto correr (reduceOnly Limit). SL em modo Full cobre a posição e encolhe junto. `manage_open_position` move o SL para breakeven quando o TP1 é atingido. `check_closed_by_exchange_for_order` soma os PnL dos fechamentos parciais
 - Position sizing: `risk_amount / sl_distance` (sem multiplicar por leverage). `min_qty` e `qty_step` por símbolo via `get_instruments_info`
 - Uma posição por vez **por símbolo** (verifica antes de abrir). Múltiplos símbolos podem ter posições simultâneas
 - Entry/exit prices reais são obtidos via `get_executions` da API (não o sugerido pela LLM)

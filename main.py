@@ -185,6 +185,9 @@ def main():
                     # 0. Verifica se posicao foi fechada por TP/SL da Bybit
                     executor.check_closed_by_exchange()
 
+                    # 0b. Gestao de TP parcial: move SL p/ breakeven apos TP1
+                    executor.manage_open_position()
+
                     # 1. Coleta dados do simbolo
                     logger.info(f"[{sym}] [DATA] Coletando dados de mercado...")
                     market_text = market.format_for_llm()

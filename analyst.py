@@ -33,6 +33,24 @@ def _build_system_prompt(symbol: str = None) -> str:
     """Constroi system prompt com valores da config para um simbolo especifico."""
     sym = symbol or cfg.SYMBOL
     asset = _symbol_label(sym)
+    if cfg.PARTIAL_TP_ENABLED:
+        tp_section = (
+            f"4. Take Profit (gerido AUTOMATICAMENTE pelo sistema — voce so informa o nivel do runner):\n"
+            f"   - O sistema usa estrategia de RISCO:RETORNO ALTO com saida parcial:\n"
+            f"     * fecha {cfg.TP1_SIZE_PCT:.0%} da posicao no TP1 = {cfg.TP1_RR_RATIO}:1 (trava lucro)\n"
+            f"     * deixa o restante correr ate o runner = {cfg.MIN_RR_RATIO}:1\n"
+            f"     * apos o TP1, o SL e movido para breakeven (runner vira risco zero)\n"
+            f"   - Informe take_profit no nivel do runner ({cfg.MIN_RR_RATIO}x a distancia do SL)\n"
+            f"   - So entre se houver espaco tecnico REALISTA ate {cfg.MIN_RR_RATIO}:1 "
+            f"(resistencia/suporte distante o suficiente)"
+        )
+    else:
+        tp_section = (
+            f"4. Take Profit: risco/retorno minimo de {cfg.MIN_RR_RATIO}:1 "
+            f"(distancia TP >= {cfg.MIN_RR_RATIO}x distancia SL)\n"
+            f"   - Posicione o TP em nivel tecnico (resistencia para LONG, suporte para SHORT)\n"
+            f"   - Bollinger Band oposta e uma boa referencia"
+        )
     return f"""Voce e um trader profissional de {asset} Futures ({sym} perpetual) na Bybit.
 Voce opera com alavancagem {cfg.LEVERAGE}x em timeframe de {cfg.TIMEFRAME} minutos.
 
@@ -88,9 +106,7 @@ Para ABRIR posicao, exija CONFLUENCIA DE NO MINIMO 3 dos 5 sinais abaixo:
    - Use ATR como referencia: SL = 1.5 x ATR (era 1.2x, aumentado para dar mais espaco)
    - Se 1.5 x ATR cair fora da faixa {cfg.SL_MIN_PCT}%-{cfg.SL_MAX_PCT}%, ajuste para ficar dentro
    - Evite SLs em niveis psicologicos redondos (ex: \$78,000 exato) — coloque \$77,940
-4. Take Profit: risco/retorno minimo de {cfg.MIN_RR_RATIO}:1 (distancia TP >= {cfg.MIN_RR_RATIO}x distancia SL)
-   - Posicione o TP em nivel tecnico (resistencia para LONG, suporte para SHORT)
-   - Bollinger Band oposta e uma boa referencia
+{tp_section}
 
 === REGRAS PARA POSICAO ABERTA (MUITO IMPORTANTE) ===
 

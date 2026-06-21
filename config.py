@@ -88,6 +88,25 @@ MIN_RR_RATIO = _get_float("MIN_RR_RATIO", "1.0")
 MIN_CONFIDENCE = _get_float("MIN_CONFIDENCE", "0.7")
 ADX_RANGING_THRESHOLD = _get_float("ADX_RANGING_THRESHOLD", "15")
 
+# Estrategia de Risco:Retorno alto — TP parcial + runner com breakeven
+# Quando ligado: fecha TP1_SIZE_PCT da posicao em TP1_RR_RATIO:1 (trava lucro)
+# e deixa o restante correr ate o runner em MIN_RR_RATIO:1. Apos o TP1,
+# o SL e movido para breakeven (entry + BREAKEVEN_OFFSET_PCT% p/ cobrir fees).
+PARTIAL_TP_ENABLED = _get_bool("PARTIAL_TP_ENABLED", "false")
+TP1_RR_RATIO = _get_float("TP1_RR_RATIO", "1.5")
+TP1_SIZE_PCT = _get_float("TP1_SIZE_PCT", "0.5")
+BREAKEVEN_AFTER_TP1 = _get_bool("BREAKEVEN_AFTER_TP1", "true")
+BREAKEVEN_OFFSET_PCT = _get_float("BREAKEVEN_OFFSET_PCT", "0.05")
+
+if PARTIAL_TP_ENABLED:
+    if not (0.0 < TP1_SIZE_PCT < 1.0):
+        print(f"[CONFIG] ERRO: TP1_SIZE_PCT deve estar entre 0 e 1 (valor: {TP1_SIZE_PCT})")
+        sys.exit(1)
+    if TP1_RR_RATIO >= MIN_RR_RATIO:
+        print(f"[CONFIG] ERRO: TP1_RR_RATIO ({TP1_RR_RATIO}) deve ser menor que "
+              f"MIN_RR_RATIO ({MIN_RR_RATIO}) — TP1 e o alvo parcial, MIN_RR_RATIO e o runner")
+        sys.exit(1)
+
 # Sentimento de mercado
 USE_SENTIMENT = _get_bool("USE_SENTIMENT", "false")
 FNG_CACHE_MINUTES = _get_int("FNG_CACHE_MINUTES", "60")

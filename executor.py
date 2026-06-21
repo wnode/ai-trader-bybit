@@ -67,6 +67,13 @@ class TradeExecutor:
         rounded = round(price / tick) * tick
         return round(rounded, self._price_decimals)
 
+    def _round_qty(self, qty: float) -> float:
+        """Arredonda qty para baixo respeitando o qty_step do simbolo."""
+        step = self._qty_step or 0.001
+        q = (qty // step) * step
+        decimals = len(f"{step:.10f}".rstrip("0").split(".")[1]) if "." in f"{step}" else 0
+        return round(q, max(0, decimals))
+
     def _create_client(self) -> HTTP:
         return HTTP(
             testnet=cfg.USE_TESTNET,
@@ -98,15 +105,25 @@ class TradeExecutor:
                 return
             pos = self._get_position()
             if pos:
+                db_qty = open_trade.get("qty") or pos["size"]
+                # Se a posicao na exchange ja esta menor que a registrada, o TP1
+                # parcial ja foi atingido — manage_open_position movera o SL p/ breakeven.
+                partial = cfg.PARTIAL_TP_ENABLED and db_qty > 0
                 self.active_trade = {
                     "side": pos["side"],
                     "entry": pos["entry"],
                     "sl": open_trade.get("stop_loss"),
                     "tp": open_trade.get("take_profit"),
                     "qty": pos["size"],
+                    "init_qty": db_qty,
                     "order_id": open_trade["order_id"],
+                    "partial": partial,
+                    "tp1": None, "tp2": open_trade.get("take_profit"),
+                    "qty1": None, "qty2": None,
+                    "breakeven_done": False,
                 }
-                logger.info(f"[{self.symbol}] [RESTORE] Trade restaurado do DB: {open_trade['side']} {pos['size']}")
+                logger.info(f"[{self.symbol}] [RESTORE] Trade restaurado do DB: {open_trade['side']} {pos['size']}"
+                            + (" (TP parcial)" if partial else ""))
             else:
                 # Posicao nao existe mais, fechar trade orfao no DB
                 self.check_closed_by_exchange_for_order(open_trade["order_id"])
@@ -135,11 +152,7 @@ class TradeExecutor:
 
         # Arredondar para qty_step do simbolo
         min_qty = self._min_qty or 0.001
-        step = self._qty_step or 0.001
-        qty = (qty // step) * step
-        # Numero de casas decimais baseado no step
-        decimals = max(0, len(f"{step:.10f}".rstrip("0").split(".")[1]) if "." in f"{step}" else 0)
-        qty = round(qty, decimals)
+        qty = self._round_qty(qty)
 
         if qty < min_qty:
             min_risk = min_qty * abs(entry - sl)
@@ -180,14 +193,11 @@ class TradeExecutor:
         if entry is None or sl is None or tp is None:
             return "Entry/SL/TP nao definidos — ignorando"
 
-        # Forcar TP = MIN_RR_RATIO x distancia do SL, respeitando tickSize
-        sl_dist = abs(entry - sl)
-        if action == "LONG":
-            tp = self._round_price(entry + sl_dist * cfg.MIN_RR_RATIO)
-        else:
-            tp = self._round_price(entry - sl_dist * cfg.MIN_RR_RATIO)
+        # SL e alvos respeitando tickSize. Runner (TP2) sempre em MIN_RR_RATIO:1.
         sl = self._round_price(sl)
-        logger.info(f"[{self.symbol}] [TP] Calculado: entry=${entry:,.2f} SL=${sl:,.2f} TP=${tp:,.2f} (R:R={cfg.MIN_RR_RATIO}:1)")
+        sl_dist = abs(entry - sl)
+        direction = 1 if action == "LONG" else -1
+        tp_runner = self._round_price(entry + direction * sl_dist * cfg.MIN_RR_RATIO)
 
         qty = self.calc_position_size(entry, sl)
         if qty <= 0:
@@ -195,14 +205,38 @@ class TradeExecutor:
 
         side = "Buy" if action == "LONG" else "Sell"
 
+        # Decide se usa TP parcial + runner ou TP unico
+        use_partial = cfg.PARTIAL_TP_ENABLED
+        tp1 = qty1 = qty2 = None
+        if use_partial:
+            tp1 = self._round_price(entry + direction * sl_dist * cfg.TP1_RR_RATIO)
+            qty1 = self._round_qty(qty * cfg.TP1_SIZE_PCT)
+            qty2 = self._round_qty(qty - qty1)
+            min_qty = self._min_qty or 0.001
+            if qty1 < min_qty or qty2 < min_qty:
+                logger.warning(f"[{self.symbol}] [TP parcial] qty {qty} nao divisivel "
+                               f"(qty1={qty1}, qty2={qty2}, min={min_qty}) — usando TP unico {cfg.MIN_RR_RATIO}:1")
+                use_partial = False
+
+        if use_partial:
+            logger.info(f"[{self.symbol}] [TP parcial] entry=${entry:,.4f} SL=${sl:,.4f} "
+                        f"TP1=${tp1:,.4f} ({qty1}@{cfg.TP1_RR_RATIO}:1) "
+                        f"TP2=${tp_runner:,.4f} ({qty2}@{cfg.MIN_RR_RATIO}:1)")
+        else:
+            logger.info(f"[{self.symbol}] [TP] entry=${entry:,.4f} SL=${sl:,.4f} "
+                        f"TP=${tp_runner:,.4f} (R:R={cfg.MIN_RR_RATIO}:1)")
+
         if cfg.DRY_RUN:
             self.active_trade = {
-                "side": side, "entry": entry, "sl": sl, "tp": tp,
-                "qty": qty, "reason": decision.get("reason", ""),
+                "side": side, "entry": entry, "sl": sl, "tp": tp_runner,
+                "qty": qty, "init_qty": qty, "reason": decision.get("reason", ""),
+                "partial": use_partial, "tp1": tp1, "tp2": tp_runner,
+                "qty1": qty1, "qty2": qty2, "breakeven_done": False,
             }
-            return (f"[{self.symbol}] [DRY] {action} {qty} @ ${entry:,.2f} "
-                    f"SL=${sl:,.2f} TP=${tp:,.2f} "
-                    f"(conf={decision.get('confidence', 0):.1f})")
+            extra = (f" TP1=${tp1:,.4f}({qty1}) TP2=${tp_runner:,.4f}({qty2})"
+                     if use_partial else f" TP=${tp_runner:,.4f}")
+            return (f"[{self.symbol}] [DRY] {action} {qty} @ ${entry:,.4f} "
+                    f"SL=${sl:,.4f}{extra} (conf={decision.get('confidence', 0):.1f})")
 
         try:
             link_id = f"{ORDER_PREFIX}-{uuid.uuid4().hex[:16]}"
@@ -222,14 +256,21 @@ class TradeExecutor:
                 # Buscar preco real de fill
                 real_entry = self._get_fill_price(order_id, fallback=entry)
 
-                # Definir SL (Market) e TP (Limit) via set_trading_stop no modo Partial
-                self._set_sl_tp(sl, tp)
+                if use_partial:
+                    # SL Market (Full mode) cobre a posicao inteira e encolhe com ela.
+                    # TP1/TP2 como ordens reduceOnly Limit (maker fee) em niveis distintos.
+                    self._set_sl_only(sl)
+                    self._place_reduce_limit(tp1, qty1, side)
+                    self._place_reduce_limit(tp_runner, qty2, side)
+                else:
+                    # Definir SL (Market) e TP (Limit) via set_trading_stop no modo Partial
+                    self._set_sl_tp(sl, tp_runner)
 
                 try:
                     db.record_open(
                         symbol=self.symbol,
                         side=action, qty=qty, entry_price=real_entry,
-                        stop_loss=sl, take_profit=tp,
+                        stop_loss=sl, take_profit=tp_runner,
                         confidence=decision.get("confidence", 0),
                         reason=decision.get("reason", ""),
                         order_id=order_id,
@@ -239,11 +280,17 @@ class TradeExecutor:
                 except Exception as e:
                     logger.error(f"[{self.symbol}] [DB] Falha ao registrar abertura no DB (posicao JA aberta na exchange) order_id={order_id}: {e}")
                 self.active_trade = {
-                    "side": side, "entry": real_entry, "sl": sl, "tp": tp,
-                    "qty": qty, "order_id": order_id,
+                    "side": side, "entry": real_entry, "sl": sl, "tp": tp_runner,
+                    "qty": qty, "init_qty": qty, "order_id": order_id,
+                    "partial": use_partial, "tp1": tp1, "tp2": tp_runner,
+                    "qty1": qty1, "qty2": qty2, "breakeven_done": False,
                 }
-                return (f"[{self.symbol}] {action} {qty} @ ${real_entry:,.2f} "
-                        f"SL=${sl:,.2f} TP=${tp:,.2f}(Limit) "
+                if use_partial:
+                    return (f"[{self.symbol}] {action} {qty} @ ${real_entry:,.4f} "
+                            f"SL=${sl:,.4f} TP1=${tp1:,.4f}({qty1}) "
+                            f"TP2=${tp_runner:,.4f}({qty2}) OrderID={order_id}")
+                return (f"[{self.symbol}] {action} {qty} @ ${real_entry:,.4f} "
+                        f"SL=${sl:,.4f} TP=${tp_runner:,.4f}(Limit) "
                         f"OrderID={order_id}")
             else:
                 return f"Erro Bybit: {result['retMsg']}"
@@ -260,6 +307,11 @@ class TradeExecutor:
         if cfg.DRY_RUN:
             self.active_trade = None
             return f"[{self.symbol}] [DRY] Fechando {pos['side']} {pos['size']}"
+
+        # Com TP parcial ha ordens reduceOnly Limit pendentes — cancela antes de
+        # fechar a mercado, senao a Bybit pode rejeitar (qty reduceOnly > posicao).
+        if self.active_trade and self.active_trade.get("partial"):
+            self._cancel_open_orders()
 
         try:
             close_side = "Sell" if pos["side"] == "Buy" else "Buy"
@@ -359,6 +411,94 @@ class TradeExecutor:
         except Exception as e:
             logger.error(f"[SL/TP] Erro fallback: {e} — posicao SEM SL/TP!")
 
+    def _set_sl_only(self, sl: float) -> bool:
+        """Define apenas o SL (Market, Full mode) cobrindo toda a posicao.
+        Usado com TP parcial, onde os TPs sao ordens reduceOnly Limit separadas.
+        O SL em Full mode encolhe junto com a posicao quando o TP1 e atingido."""
+        sl_str = str(self._round_price(sl))
+        try:
+            result = self._api_call(
+                "set_trading_stop",
+                category="linear",
+                symbol=self.symbol,
+                stopLoss=sl_str,
+                slTriggerBy="LastPrice",
+                tpslMode="Full",
+                positionIdx=0,
+            )
+            if result["retCode"] == 0:
+                logger.info(f"[{self.symbol}] [SL] Market @ ${sl:,.4f} (Full)")
+                return True
+            logger.error(f"[{self.symbol}] [SL] Falha: {result['retMsg']} — posicao SEM SL!")
+        except Exception as e:
+            logger.error(f"[{self.symbol}] [SL] Erro: {e} — posicao SEM SL!")
+        return False
+
+    def _place_reduce_limit(self, price: float, qty: float, side: str) -> str | None:
+        """Coloca ordem de TP reduceOnly Limit (maker fee). Retorna orderId ou None.
+        side = lado da POSICAO (Buy/Sell); a ordem de TP e do lado oposto."""
+        close_side = "Sell" if side == "Buy" else "Buy"
+        price_str = str(self._round_price(price))
+        try:
+            link_id = f"{ORDER_PREFIX}-tp-{uuid.uuid4().hex[:12]}"
+            result = self._api_call(
+                "place_order",
+                category="linear",
+                symbol=self.symbol,
+                side=close_side,
+                orderType="Limit",
+                qty=str(qty),
+                price=price_str,
+                reduceOnly=True,
+                timeInForce="GTC",
+                positionIdx=0,
+                orderLinkId=link_id,
+            )
+            if result["retCode"] == 0:
+                logger.info(f"[{self.symbol}] [TP] reduceOnly Limit {qty} @ ${price:,.4f} OK")
+                return result["result"]["orderId"]
+            logger.error(f"[{self.symbol}] [TP] Falha reduceOnly Limit {qty} @ ${price:,.4f}: {result['retMsg']}")
+        except Exception as e:
+            logger.error(f"[{self.symbol}] [TP] Erro reduceOnly Limit: {e}")
+        return None
+
+    def _cancel_open_orders(self):
+        """Cancela ordens abertas do simbolo (ex: TP runner orfao apos SL/CLOSE).
+        Seguro: opera uma posicao por simbolo, entao so cancela ordens deste trade."""
+        try:
+            self._api_call("cancel_all_orders", category="linear", symbol=self.symbol)
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] [CANCEL] Erro ao cancelar ordens orfas: {e}")
+
+    def manage_open_position(self):
+        """Gestao de posicao aberta com TP parcial: quando o TP1 e atingido
+        (posicao reduzida em relacao ao tamanho inicial), move o SL para
+        breakeven, tornando o runner um trade de risco zero."""
+        at = self.active_trade
+        if not at or not at.get("partial") or at.get("breakeven_done"):
+            return
+        if not cfg.BREAKEVEN_AFTER_TP1 or cfg.DRY_RUN:
+            return
+
+        pos = self._get_position()
+        if not pos:
+            return  # fechada — check_closed_by_exchange cuida do registro
+
+        init_qty = at.get("init_qty") or at.get("qty") or 0
+        if init_qty <= 0 or pos["size"] >= init_qty * 0.99:
+            return  # TP1 ainda nao atingido (posicao quase intacta)
+
+        # TP1 atingido — move SL para breakeven (entry + offset p/ cobrir fees)
+        entry = at["entry"]
+        offset = entry * (cfg.BREAKEVEN_OFFSET_PCT / 100.0)
+        be = entry + offset if at["side"] == "Buy" else entry - offset
+        be = self._round_price(be)
+        if self._set_sl_only(be):
+            at["sl"] = be
+            at["breakeven_done"] = True
+            logger.info(f"[{self.symbol}] [BREAKEVEN] TP1 atingido (resta {pos['size']}) — "
+                        f"SL movido para ${be:,.4f} (runner risco-zero)")
+
     def _get_fill_price(self, order_id: str, fallback: float) -> float:
         """Busca preco real de fill de uma ordem."""
         try:
@@ -406,6 +546,10 @@ class TradeExecutor:
         pos = self._get_position()
         if pos:
             return  # ainda aberta
+
+        # Posicao fechada: cancela ordens orfas (ex: TP runner pendente apos SL)
+        if self.active_trade.get("partial"):
+            self._cancel_open_orders()
 
         order_id = self.active_trade["order_id"]
 
@@ -458,37 +602,52 @@ class TradeExecutor:
                 category="linear", symbol=self.symbol, limit=20,
             )
 
-            # Encontrar a ordem de TP ou SL que foi Filled APOS a abertura
+            # Encontrar como a posicao fechou (ordem mais recente = fechamento final).
+            # SL vem via set_trading_stop (stopOrderType=StopLoss). TPs parciais sao
+            # ordens reduceOnly Limit com prefixo aitbot-tp (stopOrderType vazio).
             close_type = None
             for o in orders["result"]["list"]:
-                if (o["orderStatus"] == "Filled"
-                        and o["stopOrderType"] in ("TakeProfit", "StopLoss")):
-                    if opened_ms and int(o.get("updatedTime", "0")) < opened_ms:
-                        continue  # fechamento antigo, ignorar
-                    close_type = "TP" if o["stopOrderType"] == "TakeProfit" else "SL"
+                if o["orderStatus"] != "Filled":
+                    continue
+                if opened_ms and int(o.get("updatedTime", "0")) < opened_ms:
+                    continue  # fechamento antigo, ignorar
+                sot = o.get("stopOrderType", "")
+                link = o.get("orderLinkId", "")
+                if sot == "StopLoss":
+                    close_type = "SL"
+                    break
+                if sot == "TakeProfit" or link.startswith(f"{ORDER_PREFIX}-tp"):
+                    close_type = "TP"
                     break
 
-            # Buscar PnL real no closed_pnl — filtrar por timestamp da abertura
+            # Buscar PnL real no closed_pnl — somar TODOS os fechamentos do trade
+            # (com TP parcial ha 2+ fills: TP1 + TP2/SL). Filtra por timestamp da abertura.
             closed = self._api_call(
                 "get_closed_pnl",
-                category="linear", symbol=self.symbol, limit=10,
+                category="linear", symbol=self.symbol, limit=20,
             )
-            matched = None
+            total_pnl = 0.0
+            weighted_exit = 0.0
+            total_qty = 0.0
+            matched_any = False
             for item in closed["result"]["list"]:
-                # closed_pnl tem orderId da ordem de fechamento, nao da abertura
+                # closed_pnl tem orderId da ordem de fechamento, nao da abertura.
                 # Validamos pela proximidade temporal: createdTime >= opened_ms
                 if opened_ms:
                     item_ms = int(item.get("createdTime", "0"))
                     if item_ms < opened_ms:
                         continue  # fechamento de trade anterior, ignorar
-                matched = item
-                break
+                qty_c = float(item.get("qty", "0") or 0)
+                total_pnl += float(item["closedPnl"])
+                weighted_exit += float(item["avgExitPrice"]) * qty_c
+                total_qty += qty_c
+                matched_any = True
 
-            if not matched:
+            if not matched_any:
                 raise RuntimeError(f"closed_pnl vazio para {self.symbol} apos {opened_ms}")
 
-            exit_price = float(matched["avgExitPrice"])
-            pnl = float(matched["closedPnl"])
+            exit_price = (weighted_exit / total_qty) if total_qty > 0 else 0.0
+            pnl = total_pnl
 
             if close_type is None:
                 close_type = "EXCHANGE"
