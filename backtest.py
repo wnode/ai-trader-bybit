@@ -47,6 +47,22 @@ FNG_FEAR_MIN = float(os.getenv("FNG_FEAR_MIN", "20"))
 BTC_MOVE_FILTER = os.getenv("BTC_MOVE_FILTER", "off").strip().lower()
 BTC_MOVE_PCT = float(os.getenv("BTC_MOVE_PCT", "4")) / 100.0
 
+# Filtro de regime macro: so LONG se BTC acima da media de N dias, so SHORT se abaixo.
+REGIME_FILTER = os.getenv("REGIME_FILTER", "false").strip().lower() == "true"
+REGIME_MA_DAYS = int(os.getenv("REGIME_MA_DAYS", "200"))
+
+
+def regime_by_day_map(btc_daily: pd.DataFrame, ma_days: int) -> dict:
+    """Regime macro por dia: +1 se BTC>MA(ma_days), -1 se abaixo, 0 se MA nao pronta."""
+    close = btc_daily["close"]
+    ma = close.rolling(ma_days).mean()
+    out = {}
+    for k in range(len(btc_daily)):
+        d = btc_daily["timestamp"].iloc[k].date().isoformat()
+        m = ma.iloc[k]
+        out[d] = 0 if np.isnan(m) else (1 if close.iloc[k] > m else -1)
+    return out
+
 
 def bars_24h(tf: str) -> int:
     """Numero de barras que equivalem a 24h no timeframe dado."""
@@ -297,7 +313,7 @@ def simulate_trade(df, a, entry_idx, action, partial, dir_arr=None, close_on_fli
 # Passe de backtest (uma variante)
 # --------------------------------------------------------------------------
 def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip,
-                       rr=None, sl_mult=1.5, fng_arr=None, btcret_arr=None):
+                       rr=None, sl_mult=1.5, fng_arr=None, btcret_arr=None, regime_arr=None):
     """Estrategia PURA do lider (sem LLM). entry_mode: 'flip' (so na virada do
     lider) ou 'cont' (sempre que flat e o lider tem direcao). Retorna trades.
     Com FNG_FILTER e fng_arr: veta LONG em ganancia extrema, SHORT em medo extremo."""
@@ -314,6 +330,12 @@ def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip,
             enter = d != 0 and pullback_setup(a, i, d)
         else:  # continuo
             enter = d != 0
+        # Filtro de regime macro: so LONG em bull (BTC>MA), so SHORT em bear
+        if enter and REGIME_FILTER and regime_arr is not None:
+            reg = regime_arr[i]
+            if reg == 0 or (d > 0 and reg < 0) or (d < 0 and reg > 0):
+                enter = False
+
         # Filtro de movimento forte do BTC em 24h (so entra em deslocamento)
         if enter and BTC_MOVE_FILTER != "off" and btcret_arr is not None:
             r = btcret_arr[i]
@@ -387,6 +409,7 @@ def load_data(days, tf):
 
     leader_bias = {}
     btc_ret = {}
+    regime = {}
     md_cache = {}
     for lsym in leaders:
         md = MarketData(lsym)
@@ -399,6 +422,14 @@ def load_data(days, tf):
         dist = Counter(leader_bias[lsym].values())
         print(f"  [{lsym}] {len(dfl)} barras ({dfl['timestamp'].iloc[0].date()} -> {dfl['timestamp'].iloc[-1].date()}) "
               f"| vies: bull={dist.get(BULLISH,0)} bear={dist.get(BEARISH,0)} neutro={dist.get(NEUTRAL,0)}")
+
+    if REGIME_FILTER:
+        btcmd = md_cache[cfg.LEADER_BTC_SYMBOL]
+        dfd = fetch_history(btcmd, "D", days + REGIME_MA_DAYS + 20)
+        regime = regime_by_day_map(dfd, REGIME_MA_DAYS)
+        up = sum(1 for v in regime.values() if v > 0)
+        dn = sum(1 for v in regime.values() if v < 0)
+        print(f"  [REGIME] BTC vs MA{REGIME_MA_DAYS}D: {up} dias UP / {dn} dias DOWN")
 
     data = []
     for sym in alts:
@@ -414,8 +445,10 @@ def load_data(days, tf):
         dir_arr = np.array([symbol_direction(leader_bias, sym, int(t)) for t in ts])
         fng_arr = fng_for_bars(ts, fng_by_day)
         btcret_arr = np.array([btc_ret.get(int(t), np.nan) for t in ts])
+        days_bar = [datetime.fromtimestamp(int(t) / 1000, tz=timezone.utc).date().isoformat() for t in ts]
+        regime_arr = np.array([regime.get(dd, 0) for dd in days_bar]) if regime else None
         print(f"  [{sym}] {len(df)} barras ({df['timestamp'].iloc[0].date()} -> {df['timestamp'].iloc[-1].date()})")
-        data.append((sym, df, a, dir_arr, fng_arr, btcret_arr))
+        data.append((sym, df, a, dir_arr, fng_arr, btcret_arr, regime_arr))
     return leader_bias, data
 
 
@@ -445,10 +478,10 @@ def main():
         for sl_mult in (1.5,):
             for rr in (2.0, 3.0, 4.0, 5.0, 6.0):
                 allt = []
-                for sym, df, a, dir_arr, fng_arr, btcret_arr in data:
+                for sym, df, a, dir_arr, fng_arr, btcret_arr, regime_arr in data:
                     allt.extend(run_leader_variant(df, a, dir_arr, False, emode, True,
                                                    rr=rr, sl_mult=sl_mult, fng_arr=fng_arr,
-                                                   btcret_arr=btcret_arr))
+                                                   btcret_arr=btcret_arr, regime_arr=regime_arr))
                 s = stats(allt, days)
                 if not s["n"]:
                     continue
@@ -466,11 +499,11 @@ def main():
         ("flip, TP parcial, SEM fecha-virada", "flip", True, False),
     ]
     agg = {v[0]: [] for v in variants}
-    for sym, df, a, dir_arr, fng_arr, btcret_arr in data:
+    for sym, df, a, dir_arr, fng_arr, btcret_arr, regime_arr in data:
         print(f"\n[{sym}] {len(df)} barras ({df['timestamp'].iloc[0].date()} -> {df['timestamp'].iloc[-1].date()})")
         for name, emode, partial, cof in variants:
             trades = run_leader_variant(df, a, dir_arr, partial, emode, cof,
-                                        fng_arr=fng_arr, btcret_arr=btcret_arr)
+                                        fng_arr=fng_arr, btcret_arr=btcret_arr, regime_arr=regime_arr)
             agg[name].extend(trades)
             s = stats(trades, days)
             print(f"  {name:36} " + (f"n={s['n']:3}  win={s['win']:4.0f}%  exp={s['exp']:+.3f}R  "
