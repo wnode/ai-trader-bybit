@@ -97,18 +97,49 @@ class TradeExecutor:
                 else:
                     raise
 
+    def _find_recent_entry_order_id(self) -> str | None:
+        """Melhor-esforco: order_id da ordem de ABERTURA mais recente do bot
+        (aitbot, Filled, nao reduceOnly) — p/ reconstruir um trade orfao."""
+        try:
+            orders = self._api_call("get_order_history", category="linear", symbol=self.symbol, limit=20)
+            for o in orders.get("result", {}).get("list", []):
+                link = str(o.get("orderLinkId", ""))
+                if (o.get("orderStatus") == "Filled" and not o.get("reduceOnly")
+                        and not o.get("stopOrderType") and link.startswith(ORDER_PREFIX)
+                        and not link.startswith(f"{ORDER_PREFIX}-tp")
+                        and not link.startswith(f"{ORDER_PREFIX}-emg")):
+                    return o.get("orderId")
+        except Exception:
+            pass
+        return None
+
     def _restore_active_trade(self):
-        """Restaura active_trade do DB se houver trade aberto e posicao na exchange."""
+        """Restaura active_trade do DB se houver trade aberto e posicao na exchange.
+        Recupera tambem posicoes vivas SEM registro no DB (record_open falhou)."""
         try:
             open_trade = db.get_open_trade(self.symbol)
-            if not open_trade:
-                return
             pos = self._get_position()
+
+            if not open_trade:
+                if pos:
+                    # Posicao viva sem registro no DB — reconstroi p/ nao orfanar (sem gestao).
+                    order_id = self._find_recent_entry_order_id()
+                    logger.warning(f"[{self.symbol}] [RESTORE] Posicao viva SEM registro no DB "
+                                   f"({pos['side']} {pos['size']}) — reconstruindo (order_id={order_id})")
+                    self.active_trade = {
+                        "side": pos["side"], "entry": pos["entry"],
+                        "sl": None, "tp": None, "qty": pos["size"], "init_qty": pos["size"],
+                        "order_id": order_id, "partial": cfg.PARTIAL_TP_ENABLED,
+                        "tp1": None, "tp2": None, "qty1": None, "qty2": None,
+                        "breakeven_done": False,
+                    }
+                return
+
             if pos:
                 db_qty = open_trade.get("qty") or pos["size"]
-                # Se a posicao na exchange ja esta menor que a registrada, o TP1
-                # parcial ja foi atingido — manage_open_position movera o SL p/ breakeven.
                 partial = cfg.PARTIAL_TP_ENABLED and db_qty > 0
+                # Se a posicao ja reduziu, o TP1 parcial ja foi atingido -> breakeven ja movido
+                reduced = pos["size"] < db_qty * 0.99
                 self.active_trade = {
                     "side": pos["side"],
                     "entry": pos["entry"],
@@ -120,10 +151,11 @@ class TradeExecutor:
                     "partial": partial,
                     "tp1": None, "tp2": open_trade.get("take_profit"),
                     "qty1": None, "qty2": None,
-                    "breakeven_done": False,
+                    "breakeven_done": reduced,
                 }
                 logger.info(f"[{self.symbol}] [RESTORE] Trade restaurado do DB: {open_trade['side']} {pos['size']}"
-                            + (" (TP parcial)" if partial else ""))
+                            + (" (TP parcial)" if partial else "")
+                            + (" [TP1 ja atingido -> breakeven]" if reduced else ""))
             else:
                 # Posicao nao existe mais, fechar trade orfao no DB
                 self.check_closed_by_exchange_for_order(open_trade["order_id"])
@@ -436,20 +468,38 @@ class TradeExecutor:
 
     def _emergency_close(self, side: str, qty: float, reason: str):
         """Fecha a mercado (reduceOnly) uma posicao recem-aberta que ficou sem
-        protecao (SL falhou / invalido). Seguranca de dinheiro real."""
-        close_side = "Sell" if side == "Buy" else "Buy"
+        protecao (SL falhou / invalido). Re-le o tamanho REAL e so limpa o
+        active_trade se a Bybit CONFIRMAR o fechamento (retCode==0). Em falha,
+        mantem/reconstroi active_trade para nao deixar posicao orfã sem gestao."""
+        pos = self._get_position()
+        if not pos:
+            self.active_trade = None
+            return  # posicao nunca abriu / ja fechou
+        close_side = "Sell" if pos["side"] == "Buy" else "Buy"
         try:
-            self._api_call(
+            result = self._api_call(
                 "place_order",
                 category="linear", symbol=self.symbol, side=close_side,
-                orderType="Market", qty=str(qty), reduceOnly=True, positionIdx=0,
+                orderType="Market", qty=str(pos["size"]), reduceOnly=True, positionIdx=0,
                 orderLinkId=f"{ORDER_PREFIX}-emg-{uuid.uuid4().hex[:10]}",
             )
-            logger.error(f"[{self.symbol}] [SAFETY] {reason} — posicao fechada a mercado")
+            if result and result.get("retCode") == 0:
+                logger.error(f"[{self.symbol}] [SAFETY] {reason} — posicao fechada a mercado")
+                self.active_trade = None
+                return
+            msg = result.get("retMsg") if result else "sem resposta"
+            logger.critical(f"[{self.symbol}] [SAFETY] {reason} — fechamento REJEITADO ({msg}) "
+                            f"— POSICAO ABERTA SEM STOP! Mantendo controle p/ nova tentativa.")
         except Exception as e:
             logger.critical(f"[{self.symbol}] [SAFETY] {reason} — FALHA ao fechar: {e} "
-                            f"— POSICAO PODE ESTAR ABERTA SEM PROTECAO!")
-        self.active_trade = None
+                            f"— POSICAO PODE ESTAR SEM STOP! Mantendo controle.")
+        # Fechamento falhou: reconstroi active_trade minimo a partir da posicao viva
+        # para que o proximo ciclo/monitor a veja (nao orfanar em memoria).
+        self.active_trade = {
+            "side": pos["side"], "entry": pos["entry"], "qty": pos["size"],
+            "init_qty": pos["size"], "sl": None, "tp": None, "order_id": None,
+            "partial": False, "breakeven_done": True, "needs_emergency_close": True,
+        }
 
     def _set_sl_only(self, sl: float) -> bool:
         """Define apenas o SL (Market, Full mode) cobrindo toda a posicao.
@@ -515,7 +565,13 @@ class TradeExecutor:
         (posicao reduzida em relacao ao tamanho inicial), move o SL para
         breakeven, tornando o runner um trade de risco zero."""
         at = self.active_trade
-        if not at or not at.get("partial") or at.get("breakeven_done"):
+        if not at:
+            return
+        # Retry do fechamento de emergencia (SL falhou e o close anterior foi rejeitado)
+        if at.get("needs_emergency_close") and not cfg.DRY_RUN:
+            self._emergency_close(at.get("side"), at.get("qty", 0), "retry fechamento de emergencia")
+            return
+        if not at.get("partial") or at.get("breakeven_done"):
             return
         if not cfg.BREAKEVEN_AFTER_TP1 or cfg.DRY_RUN:
             return
@@ -610,7 +666,15 @@ class TradeExecutor:
                 self.active_trade = None
                 return
             except Exception as e:
-                logger.warning(f"[STATE] Retry pending_close falhou — active_trade mantido: {e}")
+                # Nao travar o simbolo para sempre: apos N tentativas, desiste
+                # (a posicao ja esta fechada na exchange; so o registro de PnL se perde).
+                pending["retries"] = pending.get("retries", 0) + 1
+                if pending["retries"] >= 5:
+                    logger.critical(f"[STATE] Retry pending_close falhou {pending['retries']}x — "
+                                    f"desistindo do registro e liberando o simbolo: {e}")
+                    self.active_trade = None
+                else:
+                    logger.warning(f"[STATE] Retry pending_close falhou ({pending['retries']}/5) — mantido: {e}")
                 return
 
         try:
@@ -660,6 +724,11 @@ class TradeExecutor:
                     break
                 if sot == "TakeProfit" or link.startswith(f"{ORDER_PREFIX}-tp"):
                     close_type = "TP"
+                    close_ms = int(o.get("updatedTime", "0"))
+                    break
+                if o.get("reduceOnly"):
+                    # Fechamento a mercado externo / liquidacao — tambem delimita a janela
+                    close_type = "EXCHANGE"
                     close_ms = int(o.get("updatedTime", "0"))
                     break
 

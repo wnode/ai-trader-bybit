@@ -143,6 +143,8 @@ def _pullback_ok(df, ind, direction) -> bool:
     """Setup de pullback no alt (mesma regra do backtest): lider da a direcao,
     o alt da o timing. LONG: tendencia de alta (close>EMA50) + RSI cruzando 50
     p/ cima + ADX forte. SHORT: espelho."""
+    if df is None or len(df) < 2:
+        return False   # historico insuficiente (ex: simbolo recem-listado)
     try:
         import pandas as pd
         ema50 = ind["ema50"].iloc[-1]
@@ -168,10 +170,11 @@ def build_mechanical_setup(sym, market, leader, sentiment) -> int:
     if d == 0:
         return 0
 
-    # Regime macro (fail-open: so bloqueia se conhecido E contrario)
+    # Regime macro — igual ao backtest: exige regime CONHECIDO e a favor da direcao
+    # (reg==0 = MA indisponivel/falha -> bloqueia; conservador e alinhado a validacao)
     if cfg.HYBRID_REGIME_FILTER:
         reg = leader.get_regime()
-        if reg != 0 and ((d > 0 and reg < 0) or (d < 0 and reg > 0)):
+        if reg == 0 or (d > 0 and reg < 0) or (d < 0 and reg > 0):
             return 0
 
     # Fear & Greed contrarian (da API gratis, ja cacheado)
@@ -384,9 +387,13 @@ def main():
                                             f"(faltam {cfg.LLM_INTERVAL_MINUTES - elapsed_min:.0f}min, economia)")
                                 continue
                         logger.info(f"[{sym}] [DATA] Coletando dados de mercado...")
-                        decision = llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text)
-                        # Marca o horario SO apos a chamada bem-sucedida (falha nao consome o intervalo)
-                        trader["last_llm_ts"] = now.timestamp()
+                        try:
+                            decision = llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text)
+                            trader["last_llm_ts"] = now.timestamp()   # sucesso: intervalo cheio
+                        except Exception:
+                            # Falha: backoff curto (~2min) — nem martela todo ciclo, nem some pelo intervalo inteiro
+                            trader["last_llm_ts"] = now.timestamp() - max(0, cfg.LLM_INTERVAL_MINUTES - 2) * 60
+                            raise
 
                     else:
                         # Modo mecanico (sem LLM): decisao pela direcao do lider BTC/ETH
