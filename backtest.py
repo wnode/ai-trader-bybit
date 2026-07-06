@@ -116,11 +116,14 @@ def symbol_direction(leader_bias: dict, sym: str, ts: int) -> int:
 # --------------------------------------------------------------------------
 # Simulacao de uma posicao (barra a barra)
 # --------------------------------------------------------------------------
-def simulate_trade(df, a, entry_idx, action, partial, dir_arr=None, close_on_flip=False):
+def simulate_trade(df, a, entry_idx, action, partial, dir_arr=None, close_on_flip=False,
+                   rr=None, sl_mult=1.5):
     """Simula uma posicao a partir de entry_idx. Retorna (exit_idx, r_net, close_type).
     R = risco (distancia entry->SL na posicao cheia). Assume SL antes do TP quando
     a barra abrange ambos (conservador). Entrada no OPEN da barra entry_idx.
+    rr = alvo do TP (runner/unico) em R; sl_mult = multiplicador do ATR no SL.
     Se close_on_flip, fecha a mercado quando o lider vira contra a posicao."""
+    rr = cfg.MIN_RR_RATIO if rr is None else rr
     n = len(df)
     entry = df["open"].iloc[entry_idx]
     atr = a["atr"][entry_idx - 1]   # ATR conhecido no fechamento da barra de sinal
@@ -128,13 +131,13 @@ def simulate_trade(df, a, entry_idx, action, partial, dir_arr=None, close_on_fli
         return entry_idx, 0.0, "SKIP"
 
     direction = 1 if action == "LONG" else -1
-    sl_frac = 1.5 * atr / entry
+    sl_frac = sl_mult * atr / entry
     sl_frac = max(cfg.SL_MIN_PCT / 100, min(cfg.SL_MAX_PCT / 100, sl_frac))
     sl_dist = entry * sl_frac
     sl0 = entry - direction * sl_dist
 
     tp1 = entry + direction * sl_dist * cfg.TP1_RR_RATIO
-    tp2 = entry + direction * sl_dist * cfg.MIN_RR_RATIO
+    tp2 = entry + direction * sl_dist * rr
     tp_single = tp2
     f1 = cfg.TP1_SIZE_PCT          # fracao no TP1
     f2 = 1 - f1                    # runner
@@ -208,7 +211,8 @@ def simulate_trade(df, a, entry_idx, action, partial, dir_arr=None, close_on_fli
 # --------------------------------------------------------------------------
 # Passe de backtest (uma variante)
 # --------------------------------------------------------------------------
-def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip):
+def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip,
+                       rr=None, sl_mult=1.5):
     """Estrategia PURA do lider (sem LLM). entry_mode: 'flip' (so na virada do
     lider) ou 'cont' (sempre que flat e o lider tem direcao). Retorna trades."""
     n = len(df)
@@ -225,7 +229,8 @@ def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip):
         if enter:
             action = "LONG" if d > 0 else "SHORT"
             exit_idx, r_net, ctype = simulate_trade(df, a, i + 1, action, partial,
-                                                    dir_arr=dir_arr, close_on_flip=close_on_flip)
+                                                    dir_arr=dir_arr, close_on_flip=close_on_flip,
+                                                    rr=rr, sl_mult=sl_mult)
             if ctype != "SKIP":
                 trades.append({"action": action, "r": r_net, "type": ctype})
             i = max(exit_idx + 1, i + 1)
@@ -262,21 +267,13 @@ def stats(trades, days):
     }
 
 
-def main():
-    days = int(sys.argv[1]) if len(sys.argv) > 1 else 180
-    tf = sys.argv[2] if len(sys.argv) > 2 else cfg.TIMEFRAME
+def load_data(days, tf):
+    """Coleta lideres + alts uma vez. Retorna (leader_bias, [(sym, df, a, dir_arr)])."""
     alts = cfg.SYMBOLS
     leaders = {cfg.LEADER_BTC_SYMBOL, cfg.LEADER_ETH_SYMBOL}
+    from collections import Counter
 
-    print(f"=== BACKTEST — ESTRATEGIA PURA DO LIDER (sem LLM) — {days} dias, {tf}min ===")
-    print(f"Alts: {alts} | Lideres: BTC={cfg.LEADER_BTC_SYMBOL} ETH={cfg.LEADER_ETH_SYMBOL} "
-          f"(ETH extra p/ {cfg.LEADER_ETH_SYMBOLS})")
-    print(f"Regra: flat + lider bullish -> LONG; bearish -> SHORT. Saidas: "
-          f"TP1={cfg.TP1_RR_RATIO}:1 ({cfg.TP1_SIZE_PCT:.0%}) + runner {cfg.MIN_RR_RATIO}:1 + breakeven.")
-    print(f"Vies do lider: EMAs alinhadas + MACD_hist + ADX>={cfg.ADX_RANGING_THRESHOLD}. Taxas incluidas. R = risco/trade.\n")
-
-    # Coleta lideres 1x -> vies por barra
-    leader_bias = {}   # symbol -> {ts_ms: bias}
+    leader_bias = {}
     md_cache = {}
     for lsym in leaders:
         md = MarketData(lsym)
@@ -284,20 +281,11 @@ def main():
         dfl = fetch_history(md, tf, days)
         al = indicators_arrays(md, dfl)
         leader_bias[lsym] = {int(dfl["ts_ms"].iloc[k]): bias_at(al, k) for k in range(len(dfl))}
-        from collections import Counter
         dist = Counter(leader_bias[lsym].values())
         print(f"  [{lsym}] {len(dfl)} barras ({dfl['timestamp'].iloc[0].date()} -> {dfl['timestamp'].iloc[-1].date()}) "
               f"| vies: bull={dist.get(BULLISH,0)} bear={dist.get(BEARISH,0)} neutro={dist.get(NEUTRAL,0)}")
 
-    # Variantes: (nome, entry_mode, partial, close_on_flip)
-    variants = [
-        ("flip, TP unico, fecha-virada", "flip", False, True),
-        ("flip, TP parcial, fecha-virada", "flip", True, True),
-        ("continuo, TP parcial, fecha-virada", "cont", True, True),
-        ("flip, TP parcial, SEM fecha-virada", "flip", True, False),
-    ]
-    agg = {v[0]: [] for v in variants}
-
+    data = []
     for sym in alts:
         md = md_cache.get(sym) or MarketData(sym)
         df = fetch_history(md, tf, days)
@@ -306,31 +294,71 @@ def main():
             continue
         a = indicators_arrays(md, df)
         a["volume"] = df["volume"].to_numpy()
-        ts_arr = df["ts_ms"].to_numpy()
-        dir_arr = np.array([symbol_direction(leader_bias, sym, int(t)) for t in ts_arr])
+        dir_arr = np.array([symbol_direction(leader_bias, sym, int(t)) for t in df["ts_ms"].to_numpy()])
+        data.append((sym, df, a, dir_arr))
+    return leader_bias, data
+
+
+def main():
+    sweep = len(sys.argv) > 1 and sys.argv[1] == "sweep"
+    argoff = 2 if sweep else 1
+    days = int(sys.argv[argoff]) if len(sys.argv) > argoff else 180
+    tf = sys.argv[argoff + 1] if len(sys.argv) > argoff + 1 else cfg.TIMEFRAME
+
+    print(f"=== BACKTEST — ESTRATEGIA PURA DO LIDER (sem LLM) — {days} dias, {tf}min ===")
+    print(f"Alts ({len(cfg.SYMBOLS)}): {cfg.SYMBOLS}")
+    print(f"Lideres: BTC={cfg.LEADER_BTC_SYMBOL} ETH={cfg.LEADER_ETH_SYMBOL} (ETH extra p/ {cfg.LEADER_ETH_SYMBOLS})")
+    print(f"Vies: EMAs alinhadas + MACD_hist + ADX>={cfg.ADX_RANGING_THRESHOLD}. Taxas incluidas. R = risco/trade.\n")
+
+    leader_bias, data = load_data(days, tf)
+    if not data:
+        print("Sem dados suficientes.")
+        return
+
+    if sweep:
+        # Varre TP ratio x SL(xATR), estrategia vencedora (flip, TP unico, fecha-virada)
+        print(f"\n=== SWEEP — flip + TP UNICO + fecha-virada (varia TP:R) | SL={cfg.SL_MIN_PCT}-{cfg.SL_MAX_PCT}% (teto grampeia o ATR) ===")
+        print(f"{'TP:R':>5}{'SL(xATR)':>9}{'trades':>8}{'/sem':>7}{'win%':>7}{'exp(R)':>8}{'PF':>6}{'DD(R)':>8}{'total(R)':>10}")
+        for sl_mult in (1.5,):
+            for rr in (2.0, 3.0, 4.0, 5.0, 6.0):
+                allt = []
+                for sym, df, a, dir_arr in data:
+                    allt.extend(run_leader_variant(df, a, dir_arr, False, "flip", True,
+                                                   rr=rr, sl_mult=sl_mult))
+                s = stats(allt, days)
+                if not s["n"]:
+                    continue
+                pf = "inf" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+                print(f"{rr:>5.0f}{sl_mult:>9.1f}{s['n']:>8}{s['per_wk']:>7.1f}{s['win']:>7.0f}"
+                      f"{s['exp']:>8.3f}{pf:>6}{s['mdd']:>8.1f}{s['total']:>10.1f}")
+        print("\nNota: exp = expectancy/trade em R (>0 lucrativo). PF>1 lucrativo. Melhor = maior exp/PF com DD aceitavel.")
+        return
+
+    # Modo padrao: compara 4 variantes de estrutura (entry/exit/close-on-flip)
+    variants = [
+        ("flip, TP unico, fecha-virada", "flip", False, True),
+        ("flip, TP parcial, fecha-virada", "flip", True, True),
+        ("continuo, TP parcial, fecha-virada", "cont", True, True),
+        ("flip, TP parcial, SEM fecha-virada", "flip", True, False),
+    ]
+    agg = {v[0]: [] for v in variants}
+    for sym, df, a, dir_arr in data:
         print(f"\n[{sym}] {len(df)} barras ({df['timestamp'].iloc[0].date()} -> {df['timestamp'].iloc[-1].date()})")
         for name, emode, partial, cof in variants:
             trades = run_leader_variant(df, a, dir_arr, partial, emode, cof)
             agg[name].extend(trades)
             s = stats(trades, days)
-            if s["n"]:
-                print(f"  {name:36} n={s['n']:3}  win={s['win']:4.0f}%  "
-                      f"exp={s['exp']:+.3f}R  PF={s['pf']:.2f}  DD={s['mdd']:.1f}R  total={s['total']:+.1f}R")
-            else:
-                print(f"  {name:36} sem trades")
+            print(f"  {name:36} " + (f"n={s['n']:3}  win={s['win']:4.0f}%  exp={s['exp']:+.3f}R  "
+                  f"PF={s['pf']:.2f}  DD={s['mdd']:.1f}R  total={s['total']:+.1f}R" if s["n"] else "sem trades"))
 
     print("\n=== AGREGADO (todos os alts) ===")
     print(f"{'variante':38}{'trades':>7}{'/sem':>7}{'win%':>7}{'exp(R)':>8}{'PF':>6}{'DD(R)':>7}{'total(R)':>9}")
     for name, _, _, _ in variants:
         s = stats(agg[name], days)
         if not s["n"]:
-            print(f"{name:38}{'sem trades':>36}")
             continue
         pf = "inf" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
         print(f"{name:38}{s['n']:>7}{s['per_wk']:>7.1f}{s['win']:>7.0f}{s['exp']:>8.3f}{pf:>6}{s['mdd']:>7.1f}{s['total']:>9.1f}")
-
-    print("\nNota: exp = expectancy/trade em R (>0 lucrativo). PF>1 lucrativo. Entrada e saida"
-          " 100% deterministicas (sem LLM). 'fecha-virada' = fecha quando o lider inverte.")
 
 
 if __name__ == "__main__":
