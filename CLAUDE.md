@@ -34,6 +34,7 @@ Tudo via `.env` (ver `.env.example`). Variáveis principais:
 - Indicadores: `RSI_PERIOD`, `EMA_FAST/MID/SLOW`, `BB_PERIOD/STD`, `ADX_PERIOD`, `ATR_PERIOD`, `MACD_FAST/SLOW/SIGNAL`
 - Regras de trading: `SL_MIN_PCT`, `SL_MAX_PCT`, `MIN_RR_RATIO`, `MIN_CONFIDENCE`, `ADX_RANGING_THRESHOLD`
 - Risco:Retorno alto (TP parcial + runner): `PARTIAL_TP_ENABLED`, `TP1_RR_RATIO`, `TP1_SIZE_PCT`, `BREAKEVEN_AFTER_TP1`, `BREAKEVEN_OFFSET_PCT`
+- Líder de mercado (filtro direcional BTC/ETH): `LEADER_FILTER_ENABLED`, `LEADER_ETH_SYMBOLS`, `LEADER_TIMEFRAME`, `LEADER_BLOCK_ON_NEUTRAL`, `LEADER_BTC_SYMBOL`, `LEADER_ETH_SYMBOL`
 
 ## Convenções
 
@@ -47,4 +48,5 @@ Tudo via `.env` (ver `.env.example`). Variáveis principais:
 - Entry/exit prices reais são obtidos via `get_executions` da API (não o sugerido pela LLM)
 - `active_trade` é restaurado do DB ao reiniciar o bot (por símbolo)
 - Loop processa símbolos sequencialmente em cada ciclo. Sentimento (Fear & Greed + xAI search) compartilhado entre todos
+- Com `LEADER_FILTER_ENABLED`: `leader.py` (`LeaderSignal`) tem `MarketData` próprios de BTC/ETH (fora de `SYMBOLS`), calcula viés bullish/bearish/neutral por líder (EMAs alinhadas + MACD_hist + ADX) via `refresh()` 1x/ciclo. `format_for_llm(sym)` injeta contexto no prompt; `get_bias(sym)` é o gate. O veto é aplicado em `main.py` **entre `analyst.analyze` e `executor.execute`**: LONG/SHORT contra o líder viram HOLD. BTC filtra todas; ETH só as de `LEADER_ETH_SYMBOLS`. CLOSE/HOLD nunca vetados. Fail-open: falha de coleta do líder não bloqueia trades
 - Histórico de decisões da LLM mantido por símbolo (`analyst.trade_history[symbol]`)

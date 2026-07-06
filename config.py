@@ -112,6 +112,27 @@ USE_SENTIMENT = _get_bool("USE_SENTIMENT", "false")
 FNG_CACHE_MINUTES = _get_int("FNG_CACHE_MINUTES", "60")
 XAI_SEARCH = _get_bool("XAI_SEARCH", "false")
 
+# Lider de mercado (BTC/ETH) — filtro direcional das altcoins
+# BTC e o gate de todas as alts; ETH e reforco p/ alts do ecossistema ETH.
+# So permite LONG se lider bullish, SHORT se bearish. CLOSE nunca e vetado.
+# Fail-open: falha de coleta do lider NAO bloqueia trades.
+LEADER_FILTER_ENABLED = _get_bool("LEADER_FILTER_ENABLED", "false")
+_leader_eth_env = os.getenv("LEADER_ETH_SYMBOLS", "").strip()
+LEADER_ETH_SYMBOLS = [s.strip().upper() for s in _leader_eth_env.split(",") if s.strip()]
+LEADER_TIMEFRAME = os.getenv("LEADER_TIMEFRAME", TIMEFRAME).strip()
+LEADER_BLOCK_ON_NEUTRAL = _get_bool("LEADER_BLOCK_ON_NEUTRAL", "false")
+LEADER_BTC_SYMBOL = os.getenv("LEADER_BTC_SYMBOL", "BTCUSDT").strip().upper()
+LEADER_ETH_SYMBOL = os.getenv("LEADER_ETH_SYMBOL", "ETHUSDT").strip().upper()
+
+if LEADER_FILTER_ENABLED:
+    if LEADER_TIMEFRAME not in VALID_TIMEFRAMES:
+        print(f"[CONFIG] ERRO: LEADER_TIMEFRAME deve ser um de {VALID_TIMEFRAMES} (valor: '{LEADER_TIMEFRAME}')")
+        sys.exit(1)
+    for _ls in LEADER_ETH_SYMBOLS:
+        if not _ls.endswith("USDT"):
+            print(f"[CONFIG] ERRO: LEADER_ETH_SYMBOLS deve terminar em USDT (valor: '{_ls}')")
+            sys.exit(1)
+
 # LLM Provider
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").strip().lower()
 

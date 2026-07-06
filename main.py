@@ -30,6 +30,7 @@ from executor import TradeExecutor
 from monitor import show_status
 from sentiment import SentimentData
 from stream import StreamAlertManager
+from leader import LeaderSignal
 import db
 
 # Logging — console + arquivo
@@ -109,6 +110,7 @@ def main():
     db.init_db()
     sentiment = SentimentData()
     stream_mgr = StreamAlertManager()
+    leader = LeaderSignal()
     analyst = create_analyst()
 
     # Cria um trader (market + executor) por simbolo. Falha de um simbolo
@@ -170,6 +172,13 @@ def main():
             if stream_text:
                 stream_mgr.clear_alerts()
 
+            # Lider de mercado (BTC/ETH) — refresh 1x por iteracao (compartilhado).
+            # Fail-open interno: nunca deixa uma falha do lider parar o ciclo.
+            try:
+                leader.refresh()
+            except Exception as e:
+                logger.warning(f"[LEADER] Erro no refresh, filtro fail-open: {e}")
+
             # Conta erros por simbolo para detectar falha sistemica
             symbol_errors = 0
 
@@ -198,9 +207,28 @@ def main():
                     if stream_text:
                         market_text += "\n\n" + stream_text
 
+                    # 1c. Contexto do lider de mercado (BTC/ETH) para este simbolo
+                    leader_text = leader.format_for_llm(sym)
+                    if leader_text:
+                        market_text += "\n\n" + leader_text
+
                     # 2. Envia a LLM com historico do simbolo
                     logger.info(f"[{sym}] [LLM] Analisando com {analyst.provider_name} {analyst.model}...")
                     decision = analyst.analyze(market_text, symbol=sym)
+
+                    # 2b. Filtro duro do lider (BTC/ETH). So gate para entradas novas;
+                    # CLOSE/HOLD passam intactos. Veta LONG/SHORT contra a direcao do lider.
+                    act = decision.get("action") if isinstance(decision, dict) else None
+                    if act in ("LONG", "SHORT"):
+                        bias = leader.get_bias(sym)
+                        vetoed = (act == "LONG" and not bias["allow_long"]) or \
+                                 (act == "SHORT" and not bias["allow_short"])
+                        if vetoed:
+                            veto = f"VETO {bias['reason']}: {act} contra o lider -> HOLD"
+                            logger.info(f"[{sym}] [LEADER] {veto}")
+                            orig = decision.get("reason", "")
+                            decision["action"] = "HOLD"
+                            decision["reason"] = (orig + " | " if orig else "") + veto
 
                     # 3. Executa decisao
                     result = executor.execute(decision)
