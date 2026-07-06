@@ -152,6 +152,12 @@ FNG_FEAR_MIN = _get_float("FNG_FEAR_MIN", "20")
 HYBRID_REGIME_FILTER = _get_bool("HYBRID_REGIME_FILTER", "true")
 REGIME_MA_DAYS = _get_int("REGIME_MA_DAYS", "200")
 
+# Verificacao PERIODICA de sentimento do LIDER (BTC/ETH) via Grok search (xAI).
+# A cada N horas o Grok busca noticias/sentimento de BTC/ETH e injeta no prompt dos
+# setups (as alts seguem o lider, entao nao precisa buscar sentimento de cada alt).
+# 0 = desligado. So funciona com LLM_PROVIDER=xai e XAI_SEARCH=true.
+LEADER_SENTIMENT_HOURS = _get_float("LEADER_SENTIMENT_HOURS", "0")
+
 # O lider e usado quando o filtro esta ligado, no modo sem-LLM, OU no hibrido.
 if LEADER_FILTER_ENABLED or not USE_LLM or LLM_AS_FILTER:
     if LEADER_TIMEFRAME not in VALID_TIMEFRAMES:

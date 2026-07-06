@@ -299,6 +299,7 @@ def main():
 
     iteration = 0
     consecutive_errors = 0
+    leader_sent_ts = 0.0   # ultimo refresh do sentimento do lider (BTC/ETH) via Grok
     max_consecutive_errors = 5
 
     if cfg.USE_LLM and cfg.LLM_AS_FILTER:
@@ -340,6 +341,18 @@ def main():
                 leader.refresh()
             except Exception as e:
                 logger.warning(f"[LEADER] Erro no refresh, filtro fail-open: {e}")
+
+            # Sentimento do LIDER (BTC/ETH) via Grok search — PERIODICO (a cada N horas).
+            # Fica em cache e entra no prompt quando um setup dispara. So xAI c/ search.
+            if (cfg.LEADER_SENTIMENT_HOURS > 0 and cfg.USE_LLM
+                    and hasattr(analyst, "refresh_leader_sentiment")):
+                if (now.timestamp() - leader_sent_ts) >= cfg.LEADER_SENTIMENT_HOURS * 3600:
+                    try:
+                        resumo = analyst.refresh_leader_sentiment()
+                        logger.info(f"[SENTIMENTO BTC/ETH via Grok] {resumo}")
+                        leader_sent_ts = now.timestamp()
+                    except Exception as e:
+                        logger.warning(f"[SENTIMENTO BTC/ETH] Falha na busca: {e}")
 
             # Conta erros por simbolo para detectar falha sistemica
             symbol_errors = 0
