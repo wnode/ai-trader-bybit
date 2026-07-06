@@ -37,6 +37,7 @@ Tudo via `.env` (ver `.env.example`). Variáveis principais:
 - Líder de mercado (filtro direcional BTC/ETH): `LEADER_FILTER_ENABLED`, `LEADER_ETH_SYMBOLS`, `LEADER_TIMEFRAME`, `LEADER_BLOCK_ON_NEUTRAL`, `LEADER_BTC_SYMBOL`, `LEADER_ETH_SYMBOL`
 - Modo de decisão: `USE_LLM` (false = mecânico, sem custo de API), `LEADER_CLOSE_ON_FLIP`
 - Economia de custo da LLM: `LLM_INTERVAL_MINUTES` (intervalo mín. entre chamadas por símbolo), `LLM_SKIP_WHEN_IN_POSITION` (não chama a LLM com posição aberta)
+- Híbrido (LLM-como-filtro): `LLM_AS_FILTER`, `HYBRID_REGIME_FILTER`, `REGIME_MA_DAYS`, `FNG_GREED_MAX`, `FNG_FEAR_MIN`
 
 ## Convenções
 
@@ -51,6 +52,7 @@ Tudo via `.env` (ver `.env.example`). Variáveis principais:
 - `active_trade` é restaurado do DB ao reiniciar o bot (por símbolo)
 - Loop processa símbolos sequencialmente em cada ciclo. Sentimento (Fear & Greed + xAI search) compartilhado entre todos
 - Economia da LLM (`USE_LLM=true`): no loop, **depois** de `check_closed_by_exchange`/`manage_open_position` (que sempre rodam), um gate pula a análise (`continue`) se `LLM_SKIP_WHEN_IN_POSITION` e há `active_trade`, ou se `LLM_INTERVAL_MINUTES` ainda não passou desde `trader['last_llm_ts']`. Gestão de posição (breakeven/reconciliação) nunca é pulada — só a chamada paga da LLM
+- Modo **híbrido** (`USE_LLM=true` + `LLM_AS_FILTER=true`): flat → `build_mechanical_setup` (líder `get_direction` → `get_regime` → F&G `sentiment.get_fear_greed` → `_pullback_ok`) detecta o setup **sem LLM**; só se houver setup chama `llm_analyze` (mesmo prompt+veto do modo LLM puro, extraído em helper). Com posição aberta → `build_mechanical_decision` (HOLD/CLOSE mecânico, sem LLM). Regime via `LeaderSignal._compute_regime` (BTC diário vs MA`REGIME_MA_DAYS`) em `refresh()`. Corta o custo de N símbolos: LLM só nos poucos setups/semana
 - Com `USE_LLM=false` (modo mecânico, sem custo de API): `main.build_mechanical_decision` decide pela direção do líder BTC/ETH (`leader.get_direction`) — flat + flip do líder → LONG/SHORT; posição aberta → HOLD, ou CLOSE se `LEADER_CLOSE_ON_FLIP` e o líder inverteu. Pula `analyst.analyze`/sentiment/stream/monitor xAI. `LeaderSignal` é construído também quando `not USE_LLM`. Estado do flip em `trader['last_dir']`. Config vencedora do backtest: `TIMEFRAME=240` (4h) + `PARTIAL_TP_ENABLED=false` (TP único 3:1). `backtest.py` valida a estratégia mecânica (determinístico, sem LLM): `python backtest.py <dias> <timeframe>`
 - Com `LEADER_FILTER_ENABLED`: `leader.py` (`LeaderSignal`) tem `MarketData` próprios de BTC/ETH (fora de `SYMBOLS`), calcula viés bullish/bearish/neutral por líder (EMAs alinhadas + MACD_hist + ADX) via `refresh()` 1x/ciclo. `format_for_llm(sym)` injeta contexto no prompt; `get_bias(sym)` é o gate. O veto é aplicado em `main.py` **entre `analyst.analyze` e `executor.execute`**: LONG/SHORT contra o líder viram HOLD. BTC filtra todas; ETH só as de `LEADER_ETH_SYMBOLS`. CLOSE/HOLD nunca vetados. Fail-open: falha de coleta do líder não bloqueia trades
 - Histórico de decisões da LLM mantido por símbolo (`analyst.trade_history[symbol]`)

@@ -139,6 +139,19 @@ USE_LLM = _get_bool("USE_LLM", "true")
 LLM_INTERVAL_MINUTES = _get_int("LLM_INTERVAL_MINUTES", "0")
 LLM_SKIP_WHEN_IN_POSITION = _get_bool("LLM_SKIP_WHEN_IN_POSITION", "false")
 
+# Hibrido: LLM como FILTRO dos setups mecanicos (custo baixo com muitos simbolos).
+# So vale com USE_LLM=true. A camada mecanica (direcao do lider BTC/ETH + pullback
+# no alt + Fear&Greed + regime macro) detecta os setups; a LLM so e chamada NESSES
+# setups para aprovar/vetar (traz o julgamento p/ elevar o WR). Sem setup = sem
+# chamada paga. Saidas ficam por conta de TP/SL (e CLOSE mecanico na virada do lider).
+LLM_AS_FILTER = _get_bool("LLM_AS_FILTER", "false")
+# Fear & Greed (contrarian): bloqueia LONG em ganancia extrema, SHORT em medo extremo
+FNG_GREED_MAX = _get_float("FNG_GREED_MAX", "80")
+FNG_FEAR_MIN = _get_float("FNG_FEAR_MIN", "20")
+# Regime macro: so LONG com BTC acima da media de N dias, so SHORT abaixo
+HYBRID_REGIME_FILTER = _get_bool("HYBRID_REGIME_FILTER", "true")
+REGIME_MA_DAYS = _get_int("REGIME_MA_DAYS", "200")
+
 # O modo mecanico precisa do sinal do lider; valida timeframe/simbolos sempre que
 # o lider for usado (filtro ligado OU modo sem-LLM).
 if LEADER_FILTER_ENABLED or not USE_LLM:

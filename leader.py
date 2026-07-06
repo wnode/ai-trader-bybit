@@ -28,9 +28,10 @@ class LeaderSignal:
     def __init__(self):
         self._markets: dict[str, MarketData] = {}   # symbol -> MarketData
         self._cache: dict[str, dict] = {}           # symbol -> {"bias", "detail"} (por iteracao)
-        # Constroi os lideres se o filtro esta ligado OU se operamos sem LLM
-        # (modo mecanico usa a direcao do lider como estrategia).
-        if cfg.LEADER_FILTER_ENABLED or not cfg.USE_LLM:
+        self._regime: int = 0                        # +1 BTC>MA200D, -1 abaixo, 0 desconhecido
+        # Constroi os lideres se o filtro esta ligado, se operamos sem LLM
+        # (modo mecanico), ou no modo hibrido (LLM-como-filtro dos setups).
+        if cfg.LEADER_FILTER_ENABLED or not cfg.USE_LLM or cfg.LLM_AS_FILTER:
             self._ensure_market(cfg.LEADER_BTC_SYMBOL)
             # So constroi o lider ETH se algum simbolo do ecossistema ETH usa
             if cfg.LEADER_ETH_SYMBOLS:
@@ -58,6 +59,31 @@ class LeaderSignal:
             except Exception as e:
                 # Fail-open: sem entrada no cache -> get_bias trata como nao-bloqueante
                 logger.warning(f"[LEADER] Falha ao obter dados de {sym}, filtro fail-open: {e}")
+
+        # Regime macro (BTC vs MA de N dias) — usado no filtro hibrido
+        if cfg.HYBRID_REGIME_FILTER and (cfg.LLM_AS_FILTER or not cfg.USE_LLM):
+            self._regime = self._compute_regime()
+
+    def _compute_regime(self) -> int:
+        """+1 se BTC acima da MA(REGIME_MA_DAYS) diaria, -1 se abaixo, 0 se indisponivel."""
+        btc = self._markets.get(cfg.LEADER_BTC_SYMBOL)
+        if not btc:
+            return 0
+        try:
+            df = btc.get_klines("D", cfg.REGIME_MA_DAYS + 20)
+            ma = df["close"].rolling(cfg.REGIME_MA_DAYS).mean().iloc[-1]
+            if pd.isna(ma):
+                return 0
+            reg = 1 if df["close"].iloc[-1] > ma else -1
+            logger.info(f"[LEADER] Regime macro: BTC {'ACIMA' if reg > 0 else 'ABAIXO'} da MA{cfg.REGIME_MA_DAYS}D")
+            return reg
+        except Exception as e:
+            logger.warning(f"[LEADER] Falha ao calcular regime (fail-open): {e}")
+            return 0
+
+    def get_regime(self) -> int:
+        """Regime macro atual: +1 bull, -1 bear, 0 desconhecido (fail-open)."""
+        return self._regime
 
     def _compute_bias(self, market: MarketData) -> dict:
         """Calcula o vies de um lider a partir dos indicadores existentes."""

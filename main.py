@@ -139,6 +139,91 @@ def build_mechanical_decision(sym, market, active_trade, leader, trader):
     return {"action": "HOLD", "reason": "sem novo flip do lider"}
 
 
+def _pullback_ok(df, ind, direction) -> bool:
+    """Setup de pullback no alt (mesma regra do backtest): lider da a direcao,
+    o alt da o timing. LONG: tendencia de alta (close>EMA50) + RSI cruzando 50
+    p/ cima + ADX forte. SHORT: espelho."""
+    try:
+        import pandas as pd
+        ema50 = ind["ema50"].iloc[-1]
+        rsi, rsi_p = ind["rsi"].iloc[-1], ind["rsi"].iloc[-2]
+        adx = ind["adx"].iloc[-1]
+        close = df["close"].iloc[-1]
+        if any(pd.isna(v) for v in (ema50, rsi, rsi_p, adx)):
+            return False
+        if adx < cfg.ADX_RANGING_THRESHOLD:
+            return False
+        if direction > 0:
+            return close > ema50 and rsi_p < 50 <= rsi
+        return close < ema50 and rsi_p > 50 >= rsi
+    except Exception:
+        return False
+
+
+def build_mechanical_setup(sym, market, leader, sentiment) -> int:
+    """Detecta um setup mecanico (barato, sem LLM). Retorna +1 LONG, -1 SHORT, 0 nenhum.
+    Camadas: direcao do lider BTC/ETH -> regime macro -> Fear&Greed -> pullback no alt.
+    So se TODAS passarem ha setup — e so entao vale gastar uma chamada da LLM."""
+    d = leader.get_direction(sym)
+    if d == 0:
+        return 0
+
+    # Regime macro (fail-open: so bloqueia se conhecido E contrario)
+    if cfg.HYBRID_REGIME_FILTER:
+        reg = leader.get_regime()
+        if reg != 0 and ((d > 0 and reg < 0) or (d < 0 and reg > 0)):
+            return 0
+
+    # Fear & Greed contrarian (da API gratis, ja cacheado)
+    fng = sentiment.get_fear_greed()
+    if fng and fng.get("value") is not None:
+        v = fng["value"]
+        if d > 0 and v >= cfg.FNG_GREED_MAX:
+            return 0
+        if d < 0 and v <= cfg.FNG_FEAR_MIN:
+            return 0
+
+    # Pullback no alt (timing)
+    try:
+        df = market.get_klines()
+        ind = market.calc_indicators(df)
+    except Exception:
+        return 0
+    if not _pullback_ok(df, ind, d):
+        return 0
+    return d
+
+
+def llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text):
+    """Monta o prompt (dados + sentimento/F&G + lider), chama a LLM e aplica o
+    veto do lider. Retorna a decisao. Usado no modo LLM puro e no hibrido."""
+    market_text = market.format_for_llm()
+    if sentiment_text:
+        market_text += "\n\n" + sentiment_text
+    if stream_text:
+        market_text += "\n\n" + stream_text
+    leader_text = leader.format_for_llm(sym)
+    if leader_text:
+        market_text += "\n\n" + leader_text
+
+    logger.info(f"[{sym}] [LLM] Analisando com {analyst.provider_name} {analyst.model}...")
+    decision = analyst.analyze(market_text, symbol=sym)
+
+    # Filtro duro do lider: veta LONG/SHORT contra a direcao do lider
+    act = decision.get("action") if isinstance(decision, dict) else None
+    if act in ("LONG", "SHORT"):
+        bias = leader.get_bias(sym)
+        vetoed = (act == "LONG" and not bias["allow_long"]) or \
+                 (act == "SHORT" and not bias["allow_short"])
+        if vetoed:
+            veto = f"VETO {bias['reason']}: {act} contra o lider -> HOLD"
+            logger.info(f"[{sym}] [LEADER] {veto}")
+            orig = decision.get("reason", "")
+            decision["action"] = "HOLD"
+            decision["reason"] = (orig + " | " if orig else "") + veto
+    return decision
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="Modo live (ordens reais)")
@@ -200,7 +285,11 @@ def main():
     consecutive_errors = 0
     max_consecutive_errors = 5
 
-    if cfg.USE_LLM:
+    if cfg.USE_LLM and cfg.LLM_AS_FILTER:
+        logger.info(f"[START] AI Trader iniciado | MODO HIBRIDO — setup mecanico (lider+pullback+F&G+regime) "
+                    f"filtrado pela LLM {analyst.provider_name} {analyst.model} | {len(traders)} simbolos "
+                    f"| TF={cfg.TIMEFRAME}min | {'DRY RUN' if dry_run else 'LIVE'}")
+    elif cfg.USE_LLM:
         logger.info(f"[START] AI Trader iniciado | {analyst.provider_name} {analyst.model} | {'DRY RUN' if dry_run else 'LIVE'}")
     else:
         logger.info(f"[START] AI Trader iniciado | MODO MECANICO (sem LLM) — direcao pelo lider BTC/ETH "
@@ -254,10 +343,24 @@ def main():
                     # 0b. Gestao de TP parcial: move SL p/ breakeven apos TP1
                     executor.manage_open_position()
 
-                    # 0c. Economia de custo da LLM (gestao de posicao acima ja rodou).
-                    # Pula a analise (nao a gestao) quando ha posicao aberta ou quando
-                    # o intervalo minimo entre chamadas ainda nao passou.
-                    if cfg.USE_LLM:
+                    # 0c. Decisao — 3 modos (gestao de posicao acima ja rodou):
+                    #  HIBRIDO (LLM-filtro): mecanica seleciona o setup, LLM aprova/veta.
+                    #  LLM puro: LLM analisa todo ciclo (com economia opcional).
+                    #  MECANICO: so a direcao do lider, sem LLM.
+                    if cfg.USE_LLM and cfg.LLM_AS_FILTER:
+                        if executor.active_trade is not None:
+                            # Posicao aberta: sem LLM. Saidas por TP/SL e CLOSE mecanico na virada.
+                            decision = build_mechanical_decision(sym, market, executor.active_trade, leader, trader)
+                        else:
+                            setup = build_mechanical_setup(sym, market, leader, sentiment)
+                            if setup == 0:
+                                logger.info(f"[{sym}] [HIBRIDO] Sem setup mecanico — LLM nao chamada")
+                                continue
+                            logger.info(f"[{sym}] [HIBRIDO] Setup {'LONG' if setup > 0 else 'SHORT'} — consultando a LLM...")
+                            decision = llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text)
+
+                    elif cfg.USE_LLM:
+                        # Economia: pula a analise quando ha posicao aberta ou dentro do intervalo
                         if cfg.LLM_SKIP_WHEN_IN_POSITION and executor.active_trade is not None:
                             logger.info(f"[{sym}] [LLM] Pulado — posicao aberta (economia; saida via TP/SL/breakeven)")
                             continue
@@ -268,40 +371,9 @@ def main():
                                             f"(faltam {cfg.LLM_INTERVAL_MINUTES - elapsed_min:.0f}min, economia)")
                                 continue
                             trader["last_llm_ts"] = now.timestamp()
-
-                    if cfg.USE_LLM:
-                        # 1. Coleta dados do simbolo
                         logger.info(f"[{sym}] [DATA] Coletando dados de mercado...")
-                        market_text = market.format_for_llm()
+                        decision = llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text)
 
-                        # 1b. Adiciona sentimento (compartilhado)
-                        if sentiment_text:
-                            market_text += "\n\n" + sentiment_text
-                        if stream_text:
-                            market_text += "\n\n" + stream_text
-
-                        # 1c. Contexto do lider de mercado (BTC/ETH) para este simbolo
-                        leader_text = leader.format_for_llm(sym)
-                        if leader_text:
-                            market_text += "\n\n" + leader_text
-
-                        # 2. Envia a LLM com historico do simbolo
-                        logger.info(f"[{sym}] [LLM] Analisando com {analyst.provider_name} {analyst.model}...")
-                        decision = analyst.analyze(market_text, symbol=sym)
-
-                        # 2b. Filtro duro do lider (BTC/ETH). So gate para entradas novas;
-                        # CLOSE/HOLD passam intactos. Veta LONG/SHORT contra a direcao do lider.
-                        act = decision.get("action") if isinstance(decision, dict) else None
-                        if act in ("LONG", "SHORT"):
-                            bias = leader.get_bias(sym)
-                            vetoed = (act == "LONG" and not bias["allow_long"]) or \
-                                     (act == "SHORT" and not bias["allow_short"])
-                            if vetoed:
-                                veto = f"VETO {bias['reason']}: {act} contra o lider -> HOLD"
-                                logger.info(f"[{sym}] [LEADER] {veto}")
-                                orig = decision.get("reason", "")
-                                decision["action"] = "HOLD"
-                                decision["reason"] = (orig + " | " if orig else "") + veto
                     else:
                         # Modo mecanico (sem LLM): decisao pela direcao do lider BTC/ETH
                         logger.info(f"[{sym}] [MECANICO] Decisao pela direcao do lider BTC/ETH...")
