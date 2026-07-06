@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 BULLISH, BEARISH, NEUTRAL = "bullish", "bearish", "neutral"
 
+# Warmup de indicadores: EMA/MACD/ADX sao recursivos; poucas barras dao valores
+# diferentes do backtest (historico longo). ~400 barras estabilizam o transiente.
+SIGNAL_WARMUP_BARS = 400
+
 
 class LeaderSignal:
     """Coleta e avalia o vies direcional dos lideres de mercado (BTC/ETH)."""
@@ -70,7 +74,7 @@ class LeaderSignal:
         if not btc:
             return 0
         try:
-            df = btc.get_klines("D", cfg.REGIME_MA_DAYS + 20)
+            df = btc.get_klines("D", cfg.REGIME_MA_DAYS + 50, closed_only=True)
             ma = df["close"].rolling(cfg.REGIME_MA_DAYS).mean().iloc[-1]
             if pd.isna(ma):
                 return 0
@@ -87,7 +91,7 @@ class LeaderSignal:
 
     def _compute_bias(self, market: MarketData) -> dict:
         """Calcula o vies de um lider a partir dos indicadores existentes."""
-        df = market.get_klines(cfg.LEADER_TIMEFRAME, cfg.KLINES_TO_SEND)
+        df = market.get_klines(cfg.LEADER_TIMEFRAME, SIGNAL_WARMUP_BARS, closed_only=True)
         ind = market.calc_indicators(df)
 
         ema9 = ind["ema9"].iloc[-1]

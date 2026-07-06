@@ -30,7 +30,7 @@ from executor import TradeExecutor
 from monitor import show_status
 from sentiment import SentimentData
 from stream import StreamAlertManager
-from leader import LeaderSignal
+from leader import LeaderSignal, SIGNAL_WARMUP_BARS
 import db
 
 # Logging — console + arquivo
@@ -120,7 +120,7 @@ def build_mechanical_decision(sym, market, active_trade, leader, trader):
     # Flat: entra apenas quando o lider MUDA para uma direcao (flip)
     if d != 0 and d != prev:
         try:
-            df = market.get_klines()
+            df = market.get_klines(limit=SIGNAL_WARMUP_BARS, closed_only=True)
             ind = market.calc_indicators(df)
             price = float(df["close"].iloc[-1])
             atr = float(ind["atr"].iloc[-1])
@@ -183,9 +183,9 @@ def build_mechanical_setup(sym, market, leader, sentiment) -> int:
         if d < 0 and v <= cfg.FNG_FEAR_MIN:
             return 0
 
-    # Pullback no alt (timing)
+    # Pullback no alt (timing) — velas FECHADAS (evita sinal que repinta)
     try:
-        df = market.get_klines()
+        df = market.get_klines(limit=SIGNAL_WARMUP_BARS, closed_only=True)
         ind = market.calc_indicators(df)
     except Exception:
         return 0
@@ -194,9 +194,11 @@ def build_mechanical_setup(sym, market, leader, sentiment) -> int:
     return d
 
 
-def llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text):
-    """Monta o prompt (dados + sentimento/F&G + lider), chama a LLM e aplica o
-    veto do lider. Retorna a decisao. Usado no modo LLM puro e no hibrido."""
+def llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text, setup_dir=None):
+    """Monta o prompt (dados + sentimento/F&G + lider), chama a LLM e aplica os
+    filtros de direcao. Retorna a decisao. Usado no modo LLM puro e no hibrido.
+    setup_dir (hibrido): +1/-1 da direcao do setup mecanico — a LLM so pode
+    APROVAR essa direcao (ou vetar via HOLD); nunca abrir na direcao oposta."""
     market_text = market.format_for_llm()
     if sentiment_text:
         market_text += "\n\n" + sentiment_text
@@ -208,6 +210,17 @@ def llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text):
 
     logger.info(f"[{sym}] [LLM] Analisando com {analyst.provider_name} {analyst.model}...")
     decision = analyst.analyze(market_text, symbol=sym)
+
+    # Reconciliacao com o setup (hibrido): a LLM so aprova a direcao do setup.
+    # Qualquer outra resposta (direcao oposta, HOLD, CLOSE) vira HOLD (veto).
+    if setup_dir and isinstance(decision, dict):
+        expected = "LONG" if setup_dir > 0 else "SHORT"
+        if decision.get("action") != expected:
+            orig = decision.get("reason", "")
+            logger.info(f"[{sym}] [HIBRIDO] LLM nao confirmou o setup {expected} "
+                        f"(respondeu {decision.get('action')}) -> HOLD")
+            decision["action"] = "HOLD"
+            decision["reason"] = (orig + " | " if orig else "") + f"LLM nao confirmou setup {expected}"
 
     # Filtro duro do lider: veta LONG/SHORT contra a direcao do lider
     act = decision.get("action") if isinstance(decision, dict) else None
@@ -357,7 +370,7 @@ def main():
                                 logger.info(f"[{sym}] [HIBRIDO] Sem setup mecanico — LLM nao chamada")
                                 continue
                             logger.info(f"[{sym}] [HIBRIDO] Setup {'LONG' if setup > 0 else 'SHORT'} — consultando a LLM...")
-                            decision = llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text)
+                            decision = llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text, setup_dir=setup)
 
                     elif cfg.USE_LLM:
                         # Economia: pula a analise quando ha posicao aberta ou dentro do intervalo
@@ -370,9 +383,10 @@ def main():
                                 logger.info(f"[{sym}] [LLM] Pulado — intervalo de {cfg.LLM_INTERVAL_MINUTES}min "
                                             f"(faltam {cfg.LLM_INTERVAL_MINUTES - elapsed_min:.0f}min, economia)")
                                 continue
-                            trader["last_llm_ts"] = now.timestamp()
                         logger.info(f"[{sym}] [DATA] Coletando dados de mercado...")
                         decision = llm_analyze(sym, market, analyst, leader, sentiment_text, stream_text)
+                        # Marca o horario SO apos a chamada bem-sucedida (falha nao consome o intervalo)
+                        trader["last_llm_ts"] = now.timestamp()
 
                     else:
                         # Modo mecanico (sem LLM): decisao pela direcao do lider BTC/ETH
