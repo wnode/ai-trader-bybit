@@ -131,6 +131,14 @@ LEADER_CLOSE_ON_FLIP = _get_bool("LEADER_CLOSE_ON_FLIP", "true")
 # fecha na virada). O codigo da LLM fica intacto para religar (USE_LLM=true).
 USE_LLM = _get_bool("USE_LLM", "true")
 
+# Economia de custo da LLM (so afeta USE_LLM=true):
+# - LLM_INTERVAL_MINUTES: intervalo minimo entre chamadas da LLM por simbolo.
+#   0 = chama todo ciclo (padrao antigo). Ex: 15 = 1x por vela de 15min (sem desperdicio).
+# - LLM_SKIP_WHEN_IN_POSITION: nao chama a LLM enquanto ha posicao aberta — as saidas
+#   ja sao geridas por TP/SL/breakeven na Bybit. Corta o maior custo (ciclos de 60s).
+LLM_INTERVAL_MINUTES = _get_int("LLM_INTERVAL_MINUTES", "0")
+LLM_SKIP_WHEN_IN_POSITION = _get_bool("LLM_SKIP_WHEN_IN_POSITION", "false")
+
 # O modo mecanico precisa do sinal do lider; valida timeframe/simbolos sempre que
 # o lider for usado (filtro ligado OU modo sem-LLM).
 if LEADER_FILTER_ENABLED or not USE_LLM:

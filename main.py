@@ -254,6 +254,21 @@ def main():
                     # 0b. Gestao de TP parcial: move SL p/ breakeven apos TP1
                     executor.manage_open_position()
 
+                    # 0c. Economia de custo da LLM (gestao de posicao acima ja rodou).
+                    # Pula a analise (nao a gestao) quando ha posicao aberta ou quando
+                    # o intervalo minimo entre chamadas ainda nao passou.
+                    if cfg.USE_LLM:
+                        if cfg.LLM_SKIP_WHEN_IN_POSITION and executor.active_trade is not None:
+                            logger.info(f"[{sym}] [LLM] Pulado — posicao aberta (economia; saida via TP/SL/breakeven)")
+                            continue
+                        if cfg.LLM_INTERVAL_MINUTES > 0:
+                            elapsed_min = (now.timestamp() - trader.get("last_llm_ts", 0.0)) / 60
+                            if elapsed_min < cfg.LLM_INTERVAL_MINUTES:
+                                logger.info(f"[{sym}] [LLM] Pulado — intervalo de {cfg.LLM_INTERVAL_MINUTES}min "
+                                            f"(faltam {cfg.LLM_INTERVAL_MINUTES - elapsed_min:.0f}min, economia)")
+                                continue
+                            trader["last_llm_ts"] = now.timestamp()
+
                     if cfg.USE_LLM:
                         # 1. Coleta dados do simbolo
                         logger.info(f"[{sym}] [DATA] Coletando dados de mercado...")
