@@ -54,6 +54,10 @@ def init_db():
                 llm_model TEXT
             )
         """)
+        # Impede linhas de abertura duplicadas para o mesmo order_id (phantom rows)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_orderid "
+                     "ON trades(order_id) WHERE order_id IS NOT NULL")
+
         row = conn.execute("SELECT version FROM schema_version").fetchone()
         current_version = row[0] if row else 0
 
@@ -99,6 +103,10 @@ def record_open(symbol: str, side: str, qty: float, entry_price: float,
 
 def record_close(order_id: str, exit_price: float, pnl: float, close_type: str) -> bool:
     """Registra fechamento de trade pelo order_id da abertura. Retorna True se atualizou."""
+    if not order_id:
+        # order_id NULL nunca casa no SQL (= NULL) e poderia fechar a linha errada — recusa.
+        logger.warning("[DB] record_close ignorado: order_id vazio/None")
+        return False
     conn = _connect()
     try:
         cursor = conn.execute("""

@@ -69,21 +69,23 @@ class LeaderSignal:
             self._regime = self._compute_regime()
 
     def _compute_regime(self) -> int:
-        """+1 se BTC acima da MA(REGIME_MA_DAYS) diaria, -1 se abaixo, 0 se indisponivel."""
+        """+1 se BTC acima da MA(REGIME_MA_DAYS) diaria, -1 se abaixo. Em falha
+        transitoria (fetch/NaN) MANTEM o ultimo regime bom (self._regime) para nao
+        paralisar as entradas das 25 moedas por um soluco de API. So e 0 no startup."""
         btc = self._markets.get(cfg.LEADER_BTC_SYMBOL)
         if not btc:
-            return 0
+            return self._regime
         try:
             df = btc.get_klines("D", cfg.REGIME_MA_DAYS + 50, closed_only=True)
             ma = df["close"].rolling(cfg.REGIME_MA_DAYS).mean().iloc[-1]
             if pd.isna(ma):
-                return 0
+                return self._regime   # MA nao pronta — mantem ultimo
             reg = 1 if df["close"].iloc[-1] > ma else -1
             logger.info(f"[LEADER] Regime macro: BTC {'ACIMA' if reg > 0 else 'ABAIXO'} da MA{cfg.REGIME_MA_DAYS}D")
             return reg
         except Exception as e:
-            logger.warning(f"[LEADER] Falha ao calcular regime (fail-open): {e}")
-            return 0
+            logger.warning(f"[LEADER] Falha ao obter regime — mantendo ultimo ({self._regime}): {e}")
+            return self._regime   # transitorio: nao paralisa (evita halt silencioso de todas as moedas)
 
     def get_regime(self) -> int:
         """Regime macro atual: +1 bull, -1 bear, 0 desconhecido (fail-open)."""

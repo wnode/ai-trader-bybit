@@ -152,9 +152,8 @@ FNG_FEAR_MIN = _get_float("FNG_FEAR_MIN", "20")
 HYBRID_REGIME_FILTER = _get_bool("HYBRID_REGIME_FILTER", "true")
 REGIME_MA_DAYS = _get_int("REGIME_MA_DAYS", "200")
 
-# O modo mecanico precisa do sinal do lider; valida timeframe/simbolos sempre que
-# o lider for usado (filtro ligado OU modo sem-LLM).
-if LEADER_FILTER_ENABLED or not USE_LLM:
+# O lider e usado quando o filtro esta ligado, no modo sem-LLM, OU no hibrido.
+if LEADER_FILTER_ENABLED or not USE_LLM or LLM_AS_FILTER:
     if LEADER_TIMEFRAME not in VALID_TIMEFRAMES:
         print(f"[CONFIG] ERRO: LEADER_TIMEFRAME deve ser um de {VALID_TIMEFRAMES} (valor: '{LEADER_TIMEFRAME}')")
         sys.exit(1)
@@ -162,6 +161,26 @@ if LEADER_FILTER_ENABLED or not USE_LLM:
         if not _ls.endswith("USDT"):
             print(f"[CONFIG] ERRO: LEADER_ETH_SYMBOLS deve terminar em USDT (valor: '{_ls}')")
             sys.exit(1)
+
+# Validacao de faixas e combos de flags (evita halt silencioso / TP degenerado)
+if MIN_RR_RATIO <= 0:
+    print(f"[CONFIG] ERRO: MIN_RR_RATIO deve ser > 0 (valor: {MIN_RR_RATIO})")
+    sys.exit(1)
+if not (0 <= FNG_FEAR_MIN < FNG_GREED_MAX <= 100):
+    print(f"[CONFIG] ERRO: exija 0 <= FNG_FEAR_MIN < FNG_GREED_MAX <= 100 "
+          f"(FEAR_MIN={FNG_FEAR_MIN}, GREED_MAX={FNG_GREED_MAX})")
+    sys.exit(1)
+if REGIME_MA_DAYS < 1:
+    print(f"[CONFIG] ERRO: REGIME_MA_DAYS deve ser >= 1 (valor: {REGIME_MA_DAYS})")
+    sys.exit(1)
+if LLM_INTERVAL_MINUTES < 0:
+    print(f"[CONFIG] ERRO: LLM_INTERVAL_MINUTES deve ser >= 0 (valor: {LLM_INTERVAL_MINUTES})")
+    sys.exit(1)
+if LLM_AS_FILTER and not USE_LLM:
+    print("[CONFIG] ERRO: LLM_AS_FILTER=true exige USE_LLM=true")
+    sys.exit(1)
+if HYBRID_REGIME_FILTER and USE_LLM and not LLM_AS_FILTER:
+    print("[CONFIG] AVISO: HYBRID_REGIME_FILTER nao tem efeito no modo LLM puro (so no hibrido)")
 
 # LLM Provider
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").strip().lower()

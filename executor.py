@@ -122,10 +122,21 @@ class TradeExecutor:
 
             if not open_trade:
                 if pos:
-                    # Posicao viva sem registro no DB — reconstroi p/ nao orfanar (sem gestao).
-                    order_id = self._find_recent_entry_order_id()
+                    # Posicao viva sem registro no DB (record_open falhou) — reconstroi
+                    # E registra no DB, para ser rastreada/fechavel e nao re-reconstruir.
+                    order_id = self._find_recent_entry_order_id() or f"restored-{self.symbol}-{int(time.time())}"
+                    side_lbl = "LONG" if pos["side"] == "Buy" else "SHORT"
                     logger.warning(f"[{self.symbol}] [RESTORE] Posicao viva SEM registro no DB "
-                                   f"({pos['side']} {pos['size']}) — reconstruindo (order_id={order_id})")
+                                   f"({pos['side']} {pos['size']}) — reconstruindo e registrando (order_id={order_id})")
+                    try:
+                        db.record_open(
+                            symbol=self.symbol, side=side_lbl, qty=pos["size"], entry_price=pos["entry"],
+                            stop_loss=None, take_profit=None, confidence=0,
+                            reason="recuperado (record_open original falhou)", order_id=order_id,
+                            llm_provider=cfg.LLM_PROVIDER, llm_model="",
+                        )
+                    except Exception as e:
+                        logger.error(f"[{self.symbol}] [RESTORE] Falha ao registrar trade recuperado: {e}")
                     self.active_trade = {
                         "side": pos["side"], "entry": pos["entry"],
                         "sl": None, "tp": None, "qty": pos["size"], "init_qty": pos["size"],
@@ -158,7 +169,16 @@ class TradeExecutor:
                             + (" [TP1 ja atingido -> breakeven]" if reduced else ""))
             else:
                 # Posicao nao existe mais, fechar trade orfao no DB
-                self.check_closed_by_exchange_for_order(open_trade["order_id"])
+                try:
+                    self.check_closed_by_exchange_for_order(open_trade["order_id"])
+                except Exception as e:
+                    # Nao reconciliou (fechamento antigo demais p/ closed_pnl) — fecha a linha
+                    # como UNKNOWN p/ nao re-restaurar um fantasma a cada reinicio.
+                    logger.warning(f"[{self.symbol}] [RESTORE] Nao reconciliou order_id={open_trade['order_id']} "
+                                   f"— marcando UNKNOWN p/ liberar: {e}")
+                    db.record_close(open_trade["order_id"],
+                                    exit_price=open_trade.get("entry_price") or 0.0,
+                                    pnl=0.0, close_type="UNKNOWN")
         except Exception as e:
             logger.warning(f"[{self.symbol}] [RESTORE] Erro ao restaurar trade: {e}")
 
@@ -471,6 +491,9 @@ class TradeExecutor:
         protecao (SL falhou / invalido). Re-le o tamanho REAL e so limpa o
         active_trade se a Bybit CONFIRMAR o fechamento (retCode==0). Em falha,
         mantem/reconstroi active_trade para nao deixar posicao orfã sem gestao."""
+        if cfg.DRY_RUN:
+            self.active_trade = None
+            return
         pos = self._get_position()
         if not pos:
             self.active_trade = None
@@ -726,6 +749,10 @@ class TradeExecutor:
                     close_type = "TP"
                     close_ms = int(o.get("updatedTime", "0"))
                     break
+                if link.startswith(f"{ORDER_PREFIX}-emg"):
+                    close_type = "EMG"   # fechamento de emergencia (SL falhou)
+                    close_ms = int(o.get("updatedTime", "0"))
+                    break
                 if o.get("reduceOnly"):
                     # Fechamento a mercado externo / liquidacao — tambem delimita a janela
                     close_type = "EXCHANGE"
@@ -757,6 +784,8 @@ class TradeExecutor:
                 weighted_exit += float(item["avgExitPrice"]) * qty_c
                 total_qty += qty_c
                 matched_any = True
+                if opened_ms is None:
+                    break  # sem timestamp de abertura (orfa): usa so o fechamento mais recente
 
             if not matched_any:
                 raise RuntimeError(f"closed_pnl vazio para {self.symbol} apos {opened_ms}")
