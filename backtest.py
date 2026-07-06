@@ -139,6 +139,25 @@ def bias_at(a: dict, i: int) -> str:
 # --------------------------------------------------------------------------
 # Direcao pura do lider (a estrategia sem LLM)
 # --------------------------------------------------------------------------
+def pullback_setup(a, i, d) -> bool:
+    """Entrada por PULLBACK: o lider da a direcao (d), o alt da o timing.
+    LONG (d>0): tendencia de alta (close>EMA50) + RSI cruzando 50 p/ cima (recuo
+    terminou) + ADX forte. SHORT: espelho. Entra melhor que perseguir o rompimento."""
+    if i < 1:
+        return False
+    ema50 = a["ema50"][i]
+    rsi, rsi_p = a["rsi"][i], a["rsi"][i - 1]
+    adx = a["adx"][i]
+    close = a["close"][i]
+    if any(np.isnan(v) for v in (ema50, rsi, rsi_p, adx)):
+        return False
+    if adx < cfg.ADX_RANGING_THRESHOLD:
+        return False   # alt lateral — sem setup
+    if d > 0:
+        return close > ema50 and rsi_p < 50 <= rsi   # dip recuperando na alta
+    return close < ema50 and rsi_p > 50 >= rsi        # repique falhando na baixa
+
+
 def symbol_direction(leader_bias: dict, sym: str, ts: int) -> int:
     """Direcao imposta pelos lideres na barra ts: +1 LONG, -1 SHORT, 0 flat.
     BTC manda; ETH (extra p/ ecossistema) precisa nao opor. Conflito -> 0."""
@@ -268,6 +287,8 @@ def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip,
         d = dir_arr[i]
         if entry_mode == "flip":
             enter = d != 0 and d != dir_arr[i - 1]
+        elif entry_mode == "pullback":
+            enter = d != 0 and pullback_setup(a, i, d)
         else:  # continuo
             enter = d != 0
         # Filtro Fear & Greed (contrarian)
@@ -350,6 +371,7 @@ def load_data(days, tf):
             continue
         a = indicators_arrays(md, df)
         a["volume"] = df["volume"].to_numpy()
+        a["close"] = df["close"].to_numpy()
         ts = df["ts_ms"].to_numpy()
         dir_arr = np.array([symbol_direction(leader_bias, sym, int(t)) for t in ts])
         fng_arr = fng_for_bars(ts, fng_by_day)
@@ -375,14 +397,16 @@ def main():
         return
 
     if sweep:
-        # Varre TP ratio x SL(xATR), estrategia vencedora (flip, TP unico, fecha-virada)
-        print(f"\n=== SWEEP — flip + TP UNICO + fecha-virada (varia TP:R) | SL={cfg.SL_MIN_PCT}-{cfg.SL_MAX_PCT}% (teto grampeia o ATR) ===")
+        # Varre TP ratio (TP unico + fecha-virada). ENTRY_MODE: flip | pullback | cont
+        emode = os.getenv("ENTRY_MODE", "flip").strip()
+        print(f"\n=== SWEEP — entrada '{emode}' + TP UNICO + fecha-virada (varia TP:R) | "
+              f"SL={cfg.SL_MIN_PCT}-{cfg.SL_MAX_PCT}% | F&G={'on' if FNG_FILTER else 'off'} ===")
         print(f"{'TP:R':>5}{'SL(xATR)':>9}{'trades':>8}{'/sem':>7}{'win%':>7}{'exp(R)':>8}{'PF':>6}{'DD(R)':>8}{'total(R)':>10}")
         for sl_mult in (1.5,):
             for rr in (2.0, 3.0, 4.0, 5.0, 6.0):
                 allt = []
                 for sym, df, a, dir_arr, fng_arr in data:
-                    allt.extend(run_leader_variant(df, a, dir_arr, False, "flip", True,
+                    allt.extend(run_leader_variant(df, a, dir_arr, False, emode, True,
                                                    rr=rr, sl_mult=sl_mult, fng_arr=fng_arr))
                 s = stats(allt, days)
                 if not s["n"]:
