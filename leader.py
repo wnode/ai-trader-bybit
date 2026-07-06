@@ -28,7 +28,9 @@ class LeaderSignal:
     def __init__(self):
         self._markets: dict[str, MarketData] = {}   # symbol -> MarketData
         self._cache: dict[str, dict] = {}           # symbol -> {"bias", "detail"} (por iteracao)
-        if cfg.LEADER_FILTER_ENABLED:
+        # Constroi os lideres se o filtro esta ligado OU se operamos sem LLM
+        # (modo mecanico usa a direcao do lider como estrategia).
+        if cfg.LEADER_FILTER_ENABLED or not cfg.USE_LLM:
             self._ensure_market(cfg.LEADER_BTC_SYMBOL)
             # So constroi o lider ETH se algum simbolo do ecossistema ETH usa
             if cfg.LEADER_ETH_SYMBOLS:
@@ -47,7 +49,7 @@ class LeaderSignal:
     def refresh(self):
         """Recalcula o vies de cada lider. Chamado 1x por iteracao (compartilhado).
         Cada lider e isolado: falha em um nao afeta o outro (fail-open)."""
-        if not cfg.LEADER_FILTER_ENABLED:
+        if not self._markets:
             return
         self._cache = {}
         for sym, market in self._markets.items():
@@ -136,6 +138,25 @@ class LeaderSignal:
             "allow_short": allow_short,
             "reason": "LIDER(" + ", ".join(reasons) + ")" if reasons else "",
         }
+
+    def get_direction(self, symbol: str) -> int:
+        """Direcao imposta pelos lideres para operar (modo mecanico sem LLM):
+        +1 = LONG, -1 = SHORT, 0 = flat/sem sinal. BTC manda; ETH (extra p/
+        ecossistema) precisa nao opor. Conflito BTC x ETH -> 0."""
+        if not self._markets:
+            return 0
+        btc_entry = self._cache.get(cfg.LEADER_BTC_SYMBOL)
+        btc = btc_entry["bias"] if btc_entry else NEUTRAL
+        eco = symbol.upper() in cfg.LEADER_ETH_SYMBOLS
+        eth = None
+        if eco:
+            eth_entry = self._cache.get(cfg.LEADER_ETH_SYMBOL)
+            eth = eth_entry["bias"] if eth_entry else NEUTRAL
+        if btc == BULLISH:
+            return 0 if (eco and eth == BEARISH) else 1
+        if btc == BEARISH:
+            return 0 if (eco and eth == BULLISH) else -1
+        return 0
 
     def format_for_llm(self, symbol: str = None) -> str:
         """Bloco de contexto do lider para o prompt. Vazio se desabilitado."""

@@ -72,22 +72,71 @@ def _sync_bybit_time():
 def print_banner(dry_run: bool, analyst):
     mode = "DRY RUN" if dry_run else "LIVE"
     symbols_str = ", ".join(cfg.SYMBOLS)
+    if cfg.USE_LLM:
+        title = ">>> AI TRADER BOT — LLM-Powered Trading <<<"
+        engine = f"Provider: {analyst.provider_name} | Model: {analyst.model}"
+        steps = ("|  2. Envia a LLM para analise (um por simbolo)                |\n"
+                 "    |  3. LLM decide: LONG / SHORT / HOLD / CLOSE                  |")
+    else:
+        title = ">>> AI TRADER BOT — Mecanico (lider BTC/ETH, sem LLM) <<<"
+        engine = f"Estrategia: direcao BTC/ETH | TF: {cfg.TIMEFRAME}min"
+        steps = ("|  2. Le a direcao do lider BTC/ETH (flip)                     |\n"
+                 "    |  3. Regra: bullish->LONG, bearish->SHORT, fecha na virada    |")
     print(f"""
     +==============================================================+
-    |    >>> AI TRADER BOT — LLM-Powered Trading <<<               |
+    |  {title:<60s}|
     +--------------------------------------------------------------+
-    |  Provider: {analyst.provider_name:<47s}|
-    |  Model: {analyst.model:<50s}|
+    |  {engine:<60s}|
     |  Symbols: {symbols_str:<48s}|
     |  Mode: {mode:<51s}|
     +--------------------------------------------------------------+
     |  1. Coleta dados de cada simbolo (klines + indicadores)      |
-    |  2. Envia a LLM para analise (um por simbolo)                |
-    |  3. LLM decide: LONG / SHORT / HOLD / CLOSE                 |
+    {steps}
     |  4. Executor abre/fecha posicao na Bybit                     |
     |  5. Repete a cada {cfg.CHECK_INTERVAL}s                                       |
     +==============================================================+
     """)
+
+
+def build_mechanical_decision(sym, market, active_trade, leader, trader):
+    """Decisao SEM LLM: guiada pela direcao do lider BTC/ETH.
+    - flat + lider vira p/ uma direcao (flip) -> LONG/SHORT
+    - posicao aberta -> HOLD; CLOSE se o lider inverte (LEADER_CLOSE_ON_FLIP)
+    Estado do flip guardado em trader['last_dir']. Entry/SL a partir do preco e ATR
+    atuais (o executor recalcula o TP em MIN_RR_RATIO:1)."""
+    d = leader.get_direction(sym)
+    prev = trader.get("last_dir", 0)
+    trader["last_dir"] = d
+    dtxt = "bullish" if d > 0 else "bearish" if d < 0 else "neutro"
+
+    if active_trade:
+        if cfg.LEADER_CLOSE_ON_FLIP and d != 0:
+            side = active_trade.get("side")
+            opposes = (side == "Buy" and d < 0) or (side == "Sell" and d > 0)
+            if opposes:
+                return {"action": "CLOSE", "reason": f"lider inverteu para {dtxt} — fechando"}
+        return {"action": "HOLD", "reason": "posicao aberta, lider mantido"}
+
+    # Flat: entra apenas quando o lider MUDA para uma direcao (flip)
+    if d != 0 and d != prev:
+        try:
+            df = market.get_klines()
+            ind = market.calc_indicators(df)
+            price = float(df["close"].iloc[-1])
+            atr = float(ind["atr"].iloc[-1])
+        except Exception as e:
+            return {"action": "HOLD", "reason": f"falha ao obter dados p/ entrada: {e}"}
+        if not (atr > 0 and price > 0):
+            return {"action": "HOLD", "reason": "ATR/preco invalido"}
+        sl_frac = max(cfg.SL_MIN_PCT / 100, min(cfg.SL_MAX_PCT / 100, 1.5 * atr / price))
+        sign = 1 if d > 0 else -1
+        sl = price * (1 - sign * sl_frac)
+        tp = price * (1 + sign * sl_frac * cfg.MIN_RR_RATIO)
+        return {"action": "LONG" if d > 0 else "SHORT",
+                "entry": price, "stop_loss": sl, "take_profit": tp,
+                "confidence": 1.0, "reason": f"lider {dtxt} (mecanico, sem LLM)"}
+
+    return {"action": "HOLD", "reason": "sem novo flip do lider"}
 
 
 def main():
@@ -151,7 +200,11 @@ def main():
     consecutive_errors = 0
     max_consecutive_errors = 5
 
-    logger.info(f"[START] AI Trader iniciado | {analyst.provider_name} {analyst.model} | {'DRY RUN' if dry_run else 'LIVE'}")
+    if cfg.USE_LLM:
+        logger.info(f"[START] AI Trader iniciado | {analyst.provider_name} {analyst.model} | {'DRY RUN' if dry_run else 'LIVE'}")
+    else:
+        logger.info(f"[START] AI Trader iniciado | MODO MECANICO (sem LLM) — direcao pelo lider BTC/ETH "
+                    f"| TF={cfg.TIMEFRAME}min | {'DRY RUN' if dry_run else 'LIVE'}")
 
     while True:
         try:
@@ -163,14 +216,18 @@ def main():
             print_banner(dry_run, analyst)
             logger.info(f"[ITER {iteration}] {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
-            # Sentimento e stream sao compartilhados entre todos os simbolos
+            # Sentimento e stream so alimentam o prompt da LLM — pulados sem LLM.
             # Drena fila do stream PRIMEIRO e limpa imediatamente para evitar
             # descartar alertas que cheguem durante o processamento dos simbolos
-            sentiment_text = sentiment.format_for_llm()
-            stream_mgr.check_alerts()
-            stream_text = stream_mgr.format_for_llm()
-            if stream_text:
-                stream_mgr.clear_alerts()
+            if cfg.USE_LLM:
+                sentiment_text = sentiment.format_for_llm()
+                stream_mgr.check_alerts()
+                stream_text = stream_mgr.format_for_llm()
+                if stream_text:
+                    stream_mgr.clear_alerts()
+            else:
+                sentiment_text = ""
+                stream_text = ""
 
             # Lider de mercado (BTC/ETH) — refresh 1x por iteracao (compartilhado).
             # Fail-open interno: nunca deixa uma falha do lider parar o ciclo.
@@ -197,45 +254,51 @@ def main():
                     # 0b. Gestao de TP parcial: move SL p/ breakeven apos TP1
                     executor.manage_open_position()
 
-                    # 1. Coleta dados do simbolo
-                    logger.info(f"[{sym}] [DATA] Coletando dados de mercado...")
-                    market_text = market.format_for_llm()
+                    if cfg.USE_LLM:
+                        # 1. Coleta dados do simbolo
+                        logger.info(f"[{sym}] [DATA] Coletando dados de mercado...")
+                        market_text = market.format_for_llm()
 
-                    # 1b. Adiciona sentimento (compartilhado)
-                    if sentiment_text:
-                        market_text += "\n\n" + sentiment_text
-                    if stream_text:
-                        market_text += "\n\n" + stream_text
+                        # 1b. Adiciona sentimento (compartilhado)
+                        if sentiment_text:
+                            market_text += "\n\n" + sentiment_text
+                        if stream_text:
+                            market_text += "\n\n" + stream_text
 
-                    # 1c. Contexto do lider de mercado (BTC/ETH) para este simbolo
-                    leader_text = leader.format_for_llm(sym)
-                    if leader_text:
-                        market_text += "\n\n" + leader_text
+                        # 1c. Contexto do lider de mercado (BTC/ETH) para este simbolo
+                        leader_text = leader.format_for_llm(sym)
+                        if leader_text:
+                            market_text += "\n\n" + leader_text
 
-                    # 2. Envia a LLM com historico do simbolo
-                    logger.info(f"[{sym}] [LLM] Analisando com {analyst.provider_name} {analyst.model}...")
-                    decision = analyst.analyze(market_text, symbol=sym)
+                        # 2. Envia a LLM com historico do simbolo
+                        logger.info(f"[{sym}] [LLM] Analisando com {analyst.provider_name} {analyst.model}...")
+                        decision = analyst.analyze(market_text, symbol=sym)
 
-                    # 2b. Filtro duro do lider (BTC/ETH). So gate para entradas novas;
-                    # CLOSE/HOLD passam intactos. Veta LONG/SHORT contra a direcao do lider.
-                    act = decision.get("action") if isinstance(decision, dict) else None
-                    if act in ("LONG", "SHORT"):
-                        bias = leader.get_bias(sym)
-                        vetoed = (act == "LONG" and not bias["allow_long"]) or \
-                                 (act == "SHORT" and not bias["allow_short"])
-                        if vetoed:
-                            veto = f"VETO {bias['reason']}: {act} contra o lider -> HOLD"
-                            logger.info(f"[{sym}] [LEADER] {veto}")
-                            orig = decision.get("reason", "")
-                            decision["action"] = "HOLD"
-                            decision["reason"] = (orig + " | " if orig else "") + veto
+                        # 2b. Filtro duro do lider (BTC/ETH). So gate para entradas novas;
+                        # CLOSE/HOLD passam intactos. Veta LONG/SHORT contra a direcao do lider.
+                        act = decision.get("action") if isinstance(decision, dict) else None
+                        if act in ("LONG", "SHORT"):
+                            bias = leader.get_bias(sym)
+                            vetoed = (act == "LONG" and not bias["allow_long"]) or \
+                                     (act == "SHORT" and not bias["allow_short"])
+                            if vetoed:
+                                veto = f"VETO {bias['reason']}: {act} contra o lider -> HOLD"
+                                logger.info(f"[{sym}] [LEADER] {veto}")
+                                orig = decision.get("reason", "")
+                                decision["action"] = "HOLD"
+                                decision["reason"] = (orig + " | " if orig else "") + veto
+                    else:
+                        # Modo mecanico (sem LLM): decisao pela direcao do lider BTC/ETH
+                        logger.info(f"[{sym}] [MECANICO] Decisao pela direcao do lider BTC/ETH...")
+                        decision = build_mechanical_decision(sym, market, executor.active_trade, leader, trader)
 
                     # 3. Executa decisao
                     result = executor.execute(decision)
                     logger.info(f"[{sym}] [EXEC] {result}")
 
-                    # 4. Registra no historico do simbolo
-                    analyst.record_decision(decision, now.strftime("%H:%M"), result, symbol=sym)
+                    # 4. Registra no historico do simbolo (so alimenta contexto da LLM)
+                    if cfg.USE_LLM:
+                        analyst.record_decision(decision, now.strftime("%H:%M"), result, symbol=sym)
                 except Exception as e:
                     symbol_errors += 1
                     logger.error(f"[{sym}] [ERROR] Erro no ciclo: {e}", exc_info=True)
@@ -277,7 +340,8 @@ def main():
         any_open = any(t["executor"].active_trade for t in traders)
         interval = 60 if any_open else cfg.CHECK_INTERVAL
         monitor_interval = cfg.SENTIMENT_MONITOR_INTERVAL
-        use_xai_monitor = (hasattr(analyst, 'check_sentiment_shift')
+        use_xai_monitor = (cfg.USE_LLM
+                           and hasattr(analyst, 'check_sentiment_shift')
                            and analyst.use_search
                            and not any_open
                            and monitor_interval > 0)

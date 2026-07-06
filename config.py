@@ -123,8 +123,17 @@ LEADER_TIMEFRAME = os.getenv("LEADER_TIMEFRAME", TIMEFRAME).strip()
 LEADER_BLOCK_ON_NEUTRAL = _get_bool("LEADER_BLOCK_ON_NEUTRAL", "false")
 LEADER_BTC_SYMBOL = os.getenv("LEADER_BTC_SYMBOL", "BTCUSDT").strip().upper()
 LEADER_ETH_SYMBOL = os.getenv("LEADER_ETH_SYMBOL", "ETHUSDT").strip().upper()
+# Modo mecanico (sem LLM): fecha a posicao quando o lider inverte de direcao
+LEADER_CLOSE_ON_FLIP = _get_bool("LEADER_CLOSE_ON_FLIP", "true")
 
-if LEADER_FILTER_ENABLED:
+# USE_LLM: se false, o bot NAO chama a LLM (custo zero). A decisao passa a ser
+# mecanica, guiada pela direcao do lider BTC/ETH (flat+bullish->LONG, bearish->SHORT,
+# fecha na virada). O codigo da LLM fica intacto para religar (USE_LLM=true).
+USE_LLM = _get_bool("USE_LLM", "true")
+
+# O modo mecanico precisa do sinal do lider; valida timeframe/simbolos sempre que
+# o lider for usado (filtro ligado OU modo sem-LLM).
+if LEADER_FILTER_ENABLED or not USE_LLM:
     if LEADER_TIMEFRAME not in VALID_TIMEFRAMES:
         print(f"[CONFIG] ERRO: LEADER_TIMEFRAME deve ser um de {VALID_TIMEFRAMES} (valor: '{LEADER_TIMEFRAME}')")
         sys.exit(1)
