@@ -42,6 +42,29 @@ FNG_FILTER = os.getenv("FNG_FILTER", "false").strip().lower() == "true"
 FNG_GREED_MAX = float(os.getenv("FNG_GREED_MAX", "80"))
 FNG_FEAR_MIN = float(os.getenv("FNG_FEAR_MIN", "20"))
 
+# Filtro de movimento do BTC em 24h. So entra quando o BTC teve deslocamento forte.
+# BTC_MOVE_FILTER: off | abs (|mov|>=pct) | down (mov<=-pct) | up (mov>=pct)
+BTC_MOVE_FILTER = os.getenv("BTC_MOVE_FILTER", "off").strip().lower()
+BTC_MOVE_PCT = float(os.getenv("BTC_MOVE_PCT", "4")) / 100.0
+
+
+def bars_24h(tf: str) -> int:
+    """Numero de barras que equivalem a 24h no timeframe dado."""
+    tf_min = 1440 if tf == "D" else (10080 if tf == "W" else int(tf))
+    return max(1, round(1440 / tf_min))
+
+
+def btc_24h_returns(dfl: pd.DataFrame, tf: str) -> dict:
+    """Retorno de 24h do BTC por barra: {ts_ms: retorno fracionario}."""
+    bars = bars_24h(tf)
+    close = dfl["close"].to_numpy()
+    ts = dfl["ts_ms"].to_numpy()
+    out = {}
+    for i in range(bars, len(close)):
+        if close[i - bars] > 0:
+            out[int(ts[i])] = (close[i] - close[i - bars]) / close[i - bars]
+    return out
+
 
 def fetch_fng() -> dict:
     """Baixa historico completo do Fear & Greed (alternative.me, desde 2018).
@@ -274,7 +297,7 @@ def simulate_trade(df, a, entry_idx, action, partial, dir_arr=None, close_on_fli
 # Passe de backtest (uma variante)
 # --------------------------------------------------------------------------
 def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip,
-                       rr=None, sl_mult=1.5, fng_arr=None):
+                       rr=None, sl_mult=1.5, fng_arr=None, btcret_arr=None):
     """Estrategia PURA do lider (sem LLM). entry_mode: 'flip' (so na virada do
     lider) ou 'cont' (sempre que flat e o lider tem direcao). Retorna trades.
     Com FNG_FILTER e fng_arr: veta LONG em ganancia extrema, SHORT em medo extremo."""
@@ -291,6 +314,18 @@ def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip,
             enter = d != 0 and pullback_setup(a, i, d)
         else:  # continuo
             enter = d != 0
+        # Filtro de movimento forte do BTC em 24h (so entra em deslocamento)
+        if enter and BTC_MOVE_FILTER != "off" and btcret_arr is not None:
+            r = btcret_arr[i]
+            if np.isnan(r):
+                enter = False
+            elif BTC_MOVE_FILTER == "abs" and abs(r) < BTC_MOVE_PCT:
+                enter = False
+            elif BTC_MOVE_FILTER == "down" and r > -BTC_MOVE_PCT:
+                enter = False
+            elif BTC_MOVE_FILTER == "up" and r < BTC_MOVE_PCT:
+                enter = False
+
         # Filtro Fear & Greed (contrarian)
         if enter and FNG_FILTER and fng_arr is not None:
             fv = fng_arr[i]
@@ -351,6 +386,7 @@ def load_data(days, tf):
         print(f"  [FNG] {len(fng_by_day)} dias de Fear&Greed (filtro: LONG<{FNG_GREED_MAX:.0f}, SHORT>{FNG_FEAR_MIN:.0f})")
 
     leader_bias = {}
+    btc_ret = {}
     md_cache = {}
     for lsym in leaders:
         md = MarketData(lsym)
@@ -358,6 +394,8 @@ def load_data(days, tf):
         dfl = fetch_history(md, tf, days)
         al = indicators_arrays(md, dfl)
         leader_bias[lsym] = {int(dfl["ts_ms"].iloc[k]): bias_at(al, k) for k in range(len(dfl))}
+        if lsym == cfg.LEADER_BTC_SYMBOL:
+            btc_ret = btc_24h_returns(dfl, tf)
         dist = Counter(leader_bias[lsym].values())
         print(f"  [{lsym}] {len(dfl)} barras ({dfl['timestamp'].iloc[0].date()} -> {dfl['timestamp'].iloc[-1].date()}) "
               f"| vies: bull={dist.get(BULLISH,0)} bear={dist.get(BEARISH,0)} neutro={dist.get(NEUTRAL,0)}")
@@ -375,8 +413,9 @@ def load_data(days, tf):
         ts = df["ts_ms"].to_numpy()
         dir_arr = np.array([symbol_direction(leader_bias, sym, int(t)) for t in ts])
         fng_arr = fng_for_bars(ts, fng_by_day)
+        btcret_arr = np.array([btc_ret.get(int(t), np.nan) for t in ts])
         print(f"  [{sym}] {len(df)} barras ({df['timestamp'].iloc[0].date()} -> {df['timestamp'].iloc[-1].date()})")
-        data.append((sym, df, a, dir_arr, fng_arr))
+        data.append((sym, df, a, dir_arr, fng_arr, btcret_arr))
     return leader_bias, data
 
 
@@ -399,15 +438,17 @@ def main():
     if sweep:
         # Varre TP ratio (TP unico + fecha-virada). ENTRY_MODE: flip | pullback | cont
         emode = os.getenv("ENTRY_MODE", "flip").strip()
+        btcf = f" | BTC24h={BTC_MOVE_FILTER}>{BTC_MOVE_PCT*100:.0f}%" if BTC_MOVE_FILTER != "off" else ""
         print(f"\n=== SWEEP — entrada '{emode}' + TP UNICO + fecha-virada (varia TP:R) | "
-              f"SL={cfg.SL_MIN_PCT}-{cfg.SL_MAX_PCT}% | F&G={'on' if FNG_FILTER else 'off'} ===")
+              f"SL={cfg.SL_MIN_PCT}-{cfg.SL_MAX_PCT}% | F&G={'on' if FNG_FILTER else 'off'}{btcf} ===")
         print(f"{'TP:R':>5}{'SL(xATR)':>9}{'trades':>8}{'/sem':>7}{'win%':>7}{'exp(R)':>8}{'PF':>6}{'DD(R)':>8}{'total(R)':>10}")
         for sl_mult in (1.5,):
             for rr in (2.0, 3.0, 4.0, 5.0, 6.0):
                 allt = []
-                for sym, df, a, dir_arr, fng_arr in data:
+                for sym, df, a, dir_arr, fng_arr, btcret_arr in data:
                     allt.extend(run_leader_variant(df, a, dir_arr, False, emode, True,
-                                                   rr=rr, sl_mult=sl_mult, fng_arr=fng_arr))
+                                                   rr=rr, sl_mult=sl_mult, fng_arr=fng_arr,
+                                                   btcret_arr=btcret_arr))
                 s = stats(allt, days)
                 if not s["n"]:
                     continue
@@ -425,10 +466,11 @@ def main():
         ("flip, TP parcial, SEM fecha-virada", "flip", True, False),
     ]
     agg = {v[0]: [] for v in variants}
-    for sym, df, a, dir_arr, fng_arr in data:
+    for sym, df, a, dir_arr, fng_arr, btcret_arr in data:
         print(f"\n[{sym}] {len(df)} barras ({df['timestamp'].iloc[0].date()} -> {df['timestamp'].iloc[-1].date()})")
         for name, emode, partial, cof in variants:
-            trades = run_leader_variant(df, a, dir_arr, partial, emode, cof, fng_arr=fng_arr)
+            trades = run_leader_variant(df, a, dir_arr, partial, emode, cof,
+                                        fng_arr=fng_arr, btcret_arr=btcret_arr)
             agg[name].extend(trades)
             s = stats(trades, days)
             print(f"  {name:36} " + (f"n={s['n']:3}  win={s['win']:4.0f}%  exp={s['exp']:+.3f}R  "
