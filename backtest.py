@@ -16,12 +16,14 @@ unico / TP parcial} x {fecha na virada do lider / nao}. Resultado em R.
 
 Uso: python backtest.py [dias]     (default 180)
 """
+import os
 import sys
 import time
 from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+import requests
 
 import config as cfg
 from market_data import MarketData
@@ -33,6 +35,47 @@ TAKER = 0.00055   # market (entrada, SL)
 MAKER = 0.00020   # limit (TPs)
 
 MS_PER_DAY = 86_400_000
+
+# Filtro Fear & Greed (contrarian): nao entra LONG em ganancia extrema (>=GREED_MAX),
+# nem SHORT em medo extremo (<=FEAR_MIN). Ligado via env FNG_FILTER=true.
+FNG_FILTER = os.getenv("FNG_FILTER", "false").strip().lower() == "true"
+FNG_GREED_MAX = float(os.getenv("FNG_GREED_MAX", "80"))
+FNG_FEAR_MIN = float(os.getenv("FNG_FEAR_MIN", "20"))
+
+
+def fetch_fng() -> dict:
+    """Baixa historico completo do Fear & Greed (alternative.me, desde 2018).
+    Retorna {date (YYYY-MM-DD UTC): valor int}."""
+    try:
+        r = requests.get("https://api.alternative.me/fng/", params={"limit": 0, "format": "json"}, timeout=20)
+        r.raise_for_status()
+        out = {}
+        for item in r.json().get("data", []):
+            day = datetime.fromtimestamp(int(item["timestamp"]), tz=timezone.utc).date().isoformat()
+            out[day] = int(item["value"])
+        return out
+    except Exception as e:
+        print(f"[FNG] Falha ao baixar historico: {e} — filtro F&G desativado")
+        return {}
+
+
+def fng_for_bars(ts_ms_array, fng_by_day: dict) -> np.ndarray:
+    """Mapeia cada barra ao valor F&G do seu dia (ou o mais recente anterior).
+    Retorna array de floats; NaN quando nao ha dado (pre-2018)."""
+    if not fng_by_day:
+        return np.full(len(ts_ms_array), np.nan)
+    days_sorted = sorted(fng_by_day)
+    vals = []
+    last = np.nan
+    di = 0
+    n_days = len(days_sorted)
+    for ts in ts_ms_array:
+        day = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).date().isoformat()
+        v = fng_by_day.get(day)
+        vals.append(float(v) if v is not None else last)
+        if v is not None:
+            last = float(v)
+    return np.array(vals)
 
 
 # --------------------------------------------------------------------------
@@ -212,9 +255,10 @@ def simulate_trade(df, a, entry_idx, action, partial, dir_arr=None, close_on_fli
 # Passe de backtest (uma variante)
 # --------------------------------------------------------------------------
 def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip,
-                       rr=None, sl_mult=1.5):
+                       rr=None, sl_mult=1.5, fng_arr=None):
     """Estrategia PURA do lider (sem LLM). entry_mode: 'flip' (so na virada do
-    lider) ou 'cont' (sempre que flat e o lider tem direcao). Retorna trades."""
+    lider) ou 'cont' (sempre que flat e o lider tem direcao). Retorna trades.
+    Com FNG_FILTER e fng_arr: veta LONG em ganancia extrema, SHORT em medo extremo."""
     n = len(df)
     trades = []
     i = 1
@@ -226,6 +270,14 @@ def run_leader_variant(df, a, dir_arr, partial, entry_mode, close_on_flip,
             enter = d != 0 and d != dir_arr[i - 1]
         else:  # continuo
             enter = d != 0
+        # Filtro Fear & Greed (contrarian)
+        if enter and FNG_FILTER and fng_arr is not None:
+            fv = fng_arr[i]
+            if not np.isnan(fv):
+                if d > 0 and fv >= FNG_GREED_MAX:
+                    enter = False   # nao compra topo de ganancia
+                elif d < 0 and fv <= FNG_FEAR_MIN:
+                    enter = False   # nao vende fundo de medo
         if enter:
             action = "LONG" if d > 0 else "SHORT"
             exit_idx, r_net, ctype = simulate_trade(df, a, i + 1, action, partial,
@@ -268,10 +320,14 @@ def stats(trades, days):
 
 
 def load_data(days, tf):
-    """Coleta lideres + alts uma vez. Retorna (leader_bias, [(sym, df, a, dir_arr)])."""
+    """Coleta lideres + alts + F&G uma vez. Retorna [(sym, df, a, dir_arr, fng_arr)]."""
     alts = cfg.SYMBOLS
     leaders = {cfg.LEADER_BTC_SYMBOL, cfg.LEADER_ETH_SYMBOL}
     from collections import Counter
+
+    fng_by_day = fetch_fng() if FNG_FILTER else {}
+    if FNG_FILTER:
+        print(f"  [FNG] {len(fng_by_day)} dias de Fear&Greed (filtro: LONG<{FNG_GREED_MAX:.0f}, SHORT>{FNG_FEAR_MIN:.0f})")
 
     leader_bias = {}
     md_cache = {}
@@ -294,8 +350,11 @@ def load_data(days, tf):
             continue
         a = indicators_arrays(md, df)
         a["volume"] = df["volume"].to_numpy()
-        dir_arr = np.array([symbol_direction(leader_bias, sym, int(t)) for t in df["ts_ms"].to_numpy()])
-        data.append((sym, df, a, dir_arr))
+        ts = df["ts_ms"].to_numpy()
+        dir_arr = np.array([symbol_direction(leader_bias, sym, int(t)) for t in ts])
+        fng_arr = fng_for_bars(ts, fng_by_day)
+        print(f"  [{sym}] {len(df)} barras ({df['timestamp'].iloc[0].date()} -> {df['timestamp'].iloc[-1].date()})")
+        data.append((sym, df, a, dir_arr, fng_arr))
     return leader_bias, data
 
 
@@ -322,9 +381,9 @@ def main():
         for sl_mult in (1.5,):
             for rr in (2.0, 3.0, 4.0, 5.0, 6.0):
                 allt = []
-                for sym, df, a, dir_arr in data:
+                for sym, df, a, dir_arr, fng_arr in data:
                     allt.extend(run_leader_variant(df, a, dir_arr, False, "flip", True,
-                                                   rr=rr, sl_mult=sl_mult))
+                                                   rr=rr, sl_mult=sl_mult, fng_arr=fng_arr))
                 s = stats(allt, days)
                 if not s["n"]:
                     continue
@@ -342,10 +401,10 @@ def main():
         ("flip, TP parcial, SEM fecha-virada", "flip", True, False),
     ]
     agg = {v[0]: [] for v in variants}
-    for sym, df, a, dir_arr in data:
+    for sym, df, a, dir_arr, fng_arr in data:
         print(f"\n[{sym}] {len(df)} barras ({df['timestamp'].iloc[0].date()} -> {df['timestamp'].iloc[-1].date()})")
         for name, emode, partial, cof in variants:
-            trades = run_leader_variant(df, a, dir_arr, partial, emode, cof)
+            trades = run_leader_variant(df, a, dir_arr, partial, emode, cof, fng_arr=fng_arr)
             agg[name].extend(trades)
             s = stats(trades, days)
             print(f"  {name:36} " + (f"n={s['n']:3}  win={s['win']:4.0f}%  exp={s['exp']:+.3f}R  "
