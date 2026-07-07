@@ -112,6 +112,89 @@ USE_SENTIMENT = _get_bool("USE_SENTIMENT", "false")
 FNG_CACHE_MINUTES = _get_int("FNG_CACHE_MINUTES", "60")
 XAI_SEARCH = _get_bool("XAI_SEARCH", "false")
 
+# Lider de mercado (BTC/ETH) — filtro direcional das altcoins
+# BTC e o gate de todas as alts; ETH e reforco p/ alts do ecossistema ETH.
+# So permite LONG se lider bullish, SHORT se bearish. CLOSE nunca e vetado.
+# Fail-open: falha de coleta do lider NAO bloqueia trades.
+LEADER_FILTER_ENABLED = _get_bool("LEADER_FILTER_ENABLED", "false")
+_leader_eth_env = os.getenv("LEADER_ETH_SYMBOLS", "").strip()
+LEADER_ETH_SYMBOLS = [s.strip().upper() for s in _leader_eth_env.split(",") if s.strip()]
+LEADER_TIMEFRAME = os.getenv("LEADER_TIMEFRAME", TIMEFRAME).strip()
+LEADER_BLOCK_ON_NEUTRAL = _get_bool("LEADER_BLOCK_ON_NEUTRAL", "false")
+LEADER_BTC_SYMBOL = os.getenv("LEADER_BTC_SYMBOL", "BTCUSDT").strip().upper()
+LEADER_ETH_SYMBOL = os.getenv("LEADER_ETH_SYMBOL", "ETHUSDT").strip().upper()
+# Modo mecanico (sem LLM): fecha a posicao quando o lider inverte de direcao
+LEADER_CLOSE_ON_FLIP = _get_bool("LEADER_CLOSE_ON_FLIP", "true")
+
+# USE_LLM: se false, o bot NAO chama a LLM (custo zero). A decisao passa a ser
+# mecanica, guiada pela direcao do lider BTC/ETH (flat+bullish->LONG, bearish->SHORT,
+# fecha na virada). O codigo da LLM fica intacto para religar (USE_LLM=true).
+USE_LLM = _get_bool("USE_LLM", "true")
+
+# Economia de custo da LLM (so afeta USE_LLM=true):
+# - LLM_INTERVAL_MINUTES: intervalo minimo entre chamadas da LLM por simbolo.
+#   0 = chama todo ciclo (padrao antigo). Ex: 15 = 1x por vela de 15min (sem desperdicio).
+# - LLM_SKIP_WHEN_IN_POSITION: nao chama a LLM enquanto ha posicao aberta — as saidas
+#   ja sao geridas por TP/SL/breakeven na Bybit. Corta o maior custo (ciclos de 60s).
+LLM_INTERVAL_MINUTES = _get_int("LLM_INTERVAL_MINUTES", "0")
+LLM_SKIP_WHEN_IN_POSITION = _get_bool("LLM_SKIP_WHEN_IN_POSITION", "false")
+
+# Hibrido: LLM como FILTRO dos setups mecanicos (custo baixo com muitos simbolos).
+# So vale com USE_LLM=true. A camada mecanica (direcao do lider BTC/ETH + pullback
+# no alt + Fear&Greed + regime macro) detecta os setups; a LLM so e chamada NESSES
+# setups para aprovar/vetar (traz o julgamento p/ elevar o WR). Sem setup = sem
+# chamada paga. Saidas ficam por conta de TP/SL (e CLOSE mecanico na virada do lider).
+LLM_AS_FILTER = _get_bool("LLM_AS_FILTER", "false")
+# Fear & Greed (contrarian): bloqueia LONG em ganancia extrema, SHORT em medo extremo
+FNG_GREED_MAX = _get_float("FNG_GREED_MAX", "80")
+FNG_FEAR_MIN = _get_float("FNG_FEAR_MIN", "20")
+# Regime macro: so LONG com BTC acima da media de N dias, so SHORT abaixo
+HYBRID_REGIME_FILTER = _get_bool("HYBRID_REGIME_FILTER", "true")
+REGIME_MA_DAYS = _get_int("REGIME_MA_DAYS", "200")
+
+# Verificacao PERIODICA de sentimento do LIDER (BTC/ETH) via Grok search (xAI).
+# A cada N horas o Grok busca noticias/sentimento de BTC/ETH e injeta no prompt dos
+# setups (as alts seguem o lider, entao nao precisa buscar sentimento de cada alt).
+# 0 = desligado. So funciona com LLM_PROVIDER=xai e XAI_SEARCH=true.
+LEADER_SENTIMENT_HOURS = _get_float("LEADER_SENTIMENT_HOURS", "0")
+
+# Funding (relevante p/ SWING em perpetuos): segurar dias paga funding a cada 8h.
+# Se ligado, pula o setup quando o funding esta muito CONTRA a posicao pretendida.
+# FUNDING_MAX_ABS em % por 8h (0.05 = 0.05%). LONG barrado se funding >= +max;
+# SHORT barrado se funding <= -max. Sempre loga a taxa quando um setup passa.
+FUNDING_FILTER = _get_bool("FUNDING_FILTER", "false")
+FUNDING_MAX_ABS = _get_float("FUNDING_MAX_ABS", "0.05")
+
+# O lider e usado quando o filtro esta ligado, no modo sem-LLM, OU no hibrido.
+if LEADER_FILTER_ENABLED or not USE_LLM or LLM_AS_FILTER:
+    if LEADER_TIMEFRAME not in VALID_TIMEFRAMES:
+        print(f"[CONFIG] ERRO: LEADER_TIMEFRAME deve ser um de {VALID_TIMEFRAMES} (valor: '{LEADER_TIMEFRAME}')")
+        sys.exit(1)
+    for _ls in LEADER_ETH_SYMBOLS:
+        if not _ls.endswith("USDT"):
+            print(f"[CONFIG] ERRO: LEADER_ETH_SYMBOLS deve terminar em USDT (valor: '{_ls}')")
+            sys.exit(1)
+
+# Validacao de faixas e combos de flags (evita halt silencioso / TP degenerado)
+if MIN_RR_RATIO <= 0:
+    print(f"[CONFIG] ERRO: MIN_RR_RATIO deve ser > 0 (valor: {MIN_RR_RATIO})")
+    sys.exit(1)
+if not (0 <= FNG_FEAR_MIN < FNG_GREED_MAX <= 100):
+    print(f"[CONFIG] ERRO: exija 0 <= FNG_FEAR_MIN < FNG_GREED_MAX <= 100 "
+          f"(FEAR_MIN={FNG_FEAR_MIN}, GREED_MAX={FNG_GREED_MAX})")
+    sys.exit(1)
+if REGIME_MA_DAYS < 1:
+    print(f"[CONFIG] ERRO: REGIME_MA_DAYS deve ser >= 1 (valor: {REGIME_MA_DAYS})")
+    sys.exit(1)
+if LLM_INTERVAL_MINUTES < 0:
+    print(f"[CONFIG] ERRO: LLM_INTERVAL_MINUTES deve ser >= 0 (valor: {LLM_INTERVAL_MINUTES})")
+    sys.exit(1)
+if LLM_AS_FILTER and not USE_LLM:
+    print("[CONFIG] ERRO: LLM_AS_FILTER=true exige USE_LLM=true")
+    sys.exit(1)
+if HYBRID_REGIME_FILTER and USE_LLM and not LLM_AS_FILTER:
+    print("[CONFIG] AVISO: HYBRID_REGIME_FILTER nao tem efeito no modo LLM puro (so no hibrido)")
+
 # LLM Provider
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").strip().lower()
 

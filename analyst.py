@@ -490,11 +490,20 @@ class XAIAnalyst(BaseAnalyst):
         self.sentiment_alert: bool = False
 
     def _call_llm(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
-        if self.use_search:
+        # No modo periodico (LEADER_SENTIMENT_HOURS>0) o refresh e conduzido pelo
+        # main loop por tempo; aqui so usamos o cache. Senao, refresh por iteracao.
+        if self.use_search and cfg.LEADER_SENTIMENT_HOURS <= 0:
             self._maybe_refresh_search()
         if self._search_cache:
             user_msg = self._search_cache + "\n\n" + user_msg
         return self._call_chat(user_msg, symbol)
+
+    def refresh_leader_sentiment(self) -> str:
+        """Atualiza o sentimento do LIDER (BTC/ETH) via Grok search. Chamado
+        periodicamente pelo main loop. Retorna um resumo curto para log."""
+        self._do_search()
+        cache = self._search_cache or ""
+        return cache.replace("\n", " ")[:220]
 
     def _call_chat(self, user_msg: str, symbol: str = None) -> tuple[str, int, int]:
         """Chat completions (usado em todas as iteracoes)."""
@@ -559,8 +568,9 @@ class XAIAnalyst(BaseAnalyst):
         """Busca sentimento via Responses API. Retorna (texto, urgencia 1-10)."""
         import requests as req
 
-        # Lista de ativos relevantes a partir dos simbolos configurados
-        assets = ", ".join(_symbol_label(s) for s in cfg.SYMBOLS)
+        # Foco nos LIDERES (BTC/ETH): as alts seguem o lider, entao o sentimento
+        # que importa e o deles — evita ruido idiossincratico das alts.
+        assets = f"{_symbol_label(cfg.LEADER_BTC_SYMBOL)}, {_symbol_label(cfg.LEADER_ETH_SYMBOL)}"
 
         payload = {
             "model": cfg.XAI_SEARCH_MODEL,

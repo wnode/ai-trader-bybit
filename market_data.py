@@ -48,14 +48,32 @@ class MarketData:
                 else:
                     raise
 
-    def get_klines(self, interval: str = None, limit: int = None) -> pd.DataFrame:
-        """Busca klines e retorna DataFrame."""
+    def get_funding_rate(self) -> float | None:
+        """Funding rate atual do simbolo (fracao por 8h; ex: 0.0001 = 0.01%).
+        None se falhar. Positivo = LONGs pagam SHORTs (caro segurar comprado)."""
+        try:
+            r = self._api_call("get_tickers", category="linear", symbol=self.symbol)
+            items = r.get("result", {}).get("list", []) if r else []
+            if items:
+                fr = items[0].get("fundingRate")
+                return float(fr) if fr not in (None, "") else None
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] Erro ao buscar funding: {e}")
+        return None
+
+    def get_klines(self, interval: str = None, limit: int = None,
+                   closed_only: bool = False) -> pd.DataFrame:
+        """Busca klines e retorna DataFrame ordenado por tempo (ascendente).
+        closed_only=True descarta a ultima vela (a que ainda esta em formacao),
+        evitando sinais que 'repintam' — a ultima linha vira a ultima vela FECHADA."""
         interval = interval or cfg.TIMEFRAME
         limit = limit or cfg.KLINES_TO_SEND
+        # Busca 1 barra a mais quando vamos descartar a em formacao
+        req_limit = limit + 1 if closed_only else limit
         result = self._api_call(
             "get_kline",
             category="linear", symbol=self.symbol,
-            interval=interval, limit=limit
+            interval=interval, limit=req_limit
         )
         if not result or result.get("retCode") != 0:
             msg = result.get("retMsg", "unknown") if result else "sem resposta"
@@ -69,6 +87,8 @@ class MarketData:
                 "close": float(c), "volume": float(vol),
             })
         df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+        if closed_only and len(df) > 1:
+            df = df.iloc[:-1].reset_index(drop=True)   # descarta a vela em formacao
         return df
 
     def calc_indicators(self, df: pd.DataFrame) -> dict:
