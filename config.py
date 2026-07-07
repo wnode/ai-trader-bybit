@@ -158,6 +158,13 @@ REGIME_MA_DAYS = _get_int("REGIME_MA_DAYS", "200")
 # 0 = desligado. So funciona com LLM_PROVIDER=xai e XAI_SEARCH=true.
 LEADER_SENTIMENT_HOURS = _get_float("LEADER_SENTIMENT_HOURS", "0")
 
+# Funding (relevante p/ SWING em perpetuos): segurar dias paga funding a cada 8h.
+# Se ligado, pula o setup quando o funding esta muito CONTRA a posicao pretendida.
+# FUNDING_MAX_ABS em % por 8h (0.05 = 0.05%). LONG barrado se funding >= +max;
+# SHORT barrado se funding <= -max. Sempre loga a taxa quando um setup passa.
+FUNDING_FILTER = _get_bool("FUNDING_FILTER", "false")
+FUNDING_MAX_ABS = _get_float("FUNDING_MAX_ABS", "0.05")
+
 # O lider e usado quando o filtro esta ligado, no modo sem-LLM, OU no hibrido.
 if LEADER_FILTER_ENABLED or not USE_LLM or LLM_AS_FILTER:
     if LEADER_TIMEFRAME not in VALID_TIMEFRAMES:

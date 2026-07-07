@@ -48,6 +48,19 @@ class MarketData:
                 else:
                     raise
 
+    def get_funding_rate(self) -> float | None:
+        """Funding rate atual do simbolo (fracao por 8h; ex: 0.0001 = 0.01%).
+        None se falhar. Positivo = LONGs pagam SHORTs (caro segurar comprado)."""
+        try:
+            r = self._api_call("get_tickers", category="linear", symbol=self.symbol)
+            items = r.get("result", {}).get("list", []) if r else []
+            if items:
+                fr = items[0].get("fundingRate")
+                return float(fr) if fr not in (None, "") else None
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] Erro ao buscar funding: {e}")
+        return None
+
     def get_klines(self, interval: str = None, limit: int = None,
                    closed_only: bool = False) -> pd.DataFrame:
         """Busca klines e retorna DataFrame ordenado por tempo (ascendente).

@@ -194,6 +194,18 @@ def build_mechanical_setup(sym, market, leader, sentiment) -> int:
         return 0
     if not _pullback_ok(df, ind, d):
         return 0
+
+    # Funding (swing): evita segurar posicao pagando funding alto contra ela
+    if cfg.FUNDING_FILTER:
+        fr = market.get_funding_rate()
+        if fr is not None:
+            fr_pct = fr * 100
+            thr = cfg.FUNDING_MAX_ABS
+            if (d > 0 and fr_pct >= thr) or (d < 0 and fr_pct <= -thr):
+                logger.info(f"[{sym}] [FUNDING] {fr_pct:+.4f}%/8h contra "
+                            f"{'LONG' if d > 0 else 'SHORT'} (limite {thr}%) — setup pulado")
+                return 0
+            logger.info(f"[{sym}] [FUNDING] {fr_pct:+.4f}%/8h — ok p/ {'LONG' if d > 0 else 'SHORT'}")
     return d
 
 
